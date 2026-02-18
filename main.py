@@ -3,16 +3,31 @@ import asyncio
 import feedparser
 from datetime import datetime, timedelta, timezone
 from telegram import Bot, LinkPreviewOptions
+from appwrite.client import Client
+from appwrite.services.databases import Databases
+from appwrite.query import Query
 
 async def main(event=None, context=None):
-    print("[START] زمان شروع:", datetime.utcnow().isoformat())
+    print("[INFO] شروع")
 
     token = os.environ.get('TELEGRAM_BOT_TOKEN')
     chat_id = os.environ.get('TELEGRAM_CHANNEL_ID')
+    endpoint = os.environ.get('APPWRITE_ENDPOINT', 'https://cloud.appwrite.io/v1')
+    project = os.environ.get('APPWRITE_PROJECT_ID')
+    key = os.environ.get('APPWRITE_API_KEY')
+    database_id = os.environ.get('APPWRITE_DATABASE_ID')
+    collection_id = 'history'
 
-    if not token or not chat_id:
-        print("[ERROR] توکن یا chat_id موجود نیست")
+    if not all([token, chat_id, endpoint, project, key, database_id]):
+        print("[ERROR] متغیرهای محیطی ناقص")
         return {"status": "error"}
+
+    client = Client()
+    client.set_endpoint(endpoint)
+    client.set_project(project)
+    client.set_key(key)
+
+    databases = Databases(client)
 
     bot = Bot(token=token)
 
@@ -33,17 +48,12 @@ async def main(event=None, context=None):
         if posted:
             break
 
-        print(f"[FEED] شروع پردازش: {url}")
-
         try:
-            # بدون await – feedparser.parse سینکرون است
             feed = feedparser.parse(url)
-
             if not feed.entries:
-                print(f"[FEED] خالی: {url}")
                 continue
 
-            for entry in feed.entries[:5]:  # محدود به ۵ خبر برای سرعت
+            for entry in feed.entries:
                 if posted:
                     break
 
@@ -62,11 +72,29 @@ async def main(event=None, context=None):
 
                 description = (entry.get('summary') or entry.get('description') or "").strip()
 
+                # چک تکراری
+                is_duplicate = False
+                try:
+                    res = databases.list_documents(
+                        database_id=database_id,
+                        collection_id=collection_id,
+                        queries=[Query.equal("link", link)],
+                        limit=1
+                    )
+                    if res.get('total', 0) > 0:
+                        is_duplicate = True
+                        print(f"[SKIP] تکراری: {title[:70]}")
+                except Exception as e:
+                    print(f"[WARN] خطا در چک دیتابیس: {str(e)} - ادامه بدون چک")
+
+                if is_duplicate:
+                    continue
+
                 final_text = (
                     f"{title}\n\n"
                     f"@candidatoryiran\n\n"
                     f"{description}\n\n"
-                    f"کانال خبری کاندیداتوری"
+                    f"@candidatoryiran - کانال خبری کاندیداتوری"
                 )
 
                 image_url = None
@@ -79,7 +107,6 @@ async def main(event=None, context=None):
                             break
 
                 try:
-                    print(f"[SEND] تلاش برای ارسال: {title[:50]}...")
                     if image_url:
                         await bot.send_photo(
                             chat_id=chat_id,
@@ -98,7 +125,23 @@ async def main(event=None, context=None):
                         )
 
                     posted = True
-                    print(f"[SUCCESS] ارسال موفق: {title[:70]} (لینک: {link})")
+                    print(f"[SUCCESS] ارسال موفق: {title[:70]}")
+
+                    # ذخیره لینک در دیتابیس
+                    try:
+                        databases.create_document(
+                            database_id=database_id,
+                            collection_id=collection_id,
+                            document_id='unique()',
+                            data={
+                                'link': link,
+                                'title': title[:300],  # محدود به سایز ستون
+                                'created_at': now.isoformat()
+                            }
+                        )
+                        print("[DB] لینک ذخیره شد")
+                    except Exception as save_err:
+                        print(f"[WARN] خطا در ذخیره دیتابیس: {str(save_err)}")
 
                 except Exception as send_err:
                     print(f"[ERROR] خطا در ارسال: {str(send_err)}")
