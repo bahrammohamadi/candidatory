@@ -13,12 +13,12 @@ async def main(event=None, context=None):
     token = os.environ.get('TELEGRAM_BOT_TOKEN')
     chat_id = os.environ.get('TELEGRAM_CHANNEL_ID')
 
-    # برای Appwrite
+    # Appwrite vars
     endpoint = os.environ.get('APPWRITE_ENDPOINT', 'https://cloud.appwrite.io/v1')
     project = os.environ.get('APPWRITE_PROJECT_ID')
     key = os.environ.get('APPWRITE_API_KEY')
     database_id = os.environ.get('APPWRITE_DATABASE_ID')
-    collection_id = 'history'
+    collection_id = 'history'  # یا 'candidatable' اگر تغییر دادی
 
     if not token or not chat_id:
         print("[ERROR] توکن یا chat_id نیست")
@@ -74,7 +74,7 @@ async def main(event=None, context=None):
 
                 description = (entry.get('summary') or entry.get('description') or "").strip()
 
-                # چک تکراری قبل از ارسال
+                # چک تکراری در دیتابیس
                 is_duplicate = False
                 try:
                     res = databases.list_documents(
@@ -92,7 +92,7 @@ async def main(event=None, context=None):
                 if is_duplicate:
                     continue
 
-                # فرمت دقیق درخواستی
+                # فرمت نهایی
                 final_text = (
                     f"{title}\n\n"
                     f"@candidatoryiran\n\n"
@@ -130,7 +130,7 @@ async def main(event=None, context=None):
                     posted = True
                     print(f"[SUCCESS] ارسال شد: {title[:70]}")
 
-                    # ذخیره در دیتابیس
+                    # ذخیره لینک در دیتابیس
                     try:
                         databases.create_document(
                             database_id=database_id,
