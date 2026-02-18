@@ -92,10 +92,7 @@ async def main(event=None, context=None):
                     f"{title}\n\n"
                     f"@candidatoryiran\n\n"
                     f"{description}\n\n"
-                    f"____________"
                     f"کانال خبری کاندیداتوری"
-                    f"🆔 @candidatoryiran"
-                    f"🆔 Instagram.com/candidatory.ir"
                 )
 
                 image_url = None
