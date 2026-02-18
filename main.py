@@ -114,7 +114,7 @@ async def main(event=None, context=None):
                     continue
 
                 final_text = (
-                    f"{title}\n\n"
+                    f"💠<b>{title}</b>\n\n"
                     f"@candidatoryiran\n\n"
                     f"{description}\n\n"
                     f"🇮🇷 🇮🇷 🇮🇷 🇮🇷 🇮🇷 🇮🇷\n"
