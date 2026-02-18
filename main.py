@@ -4,18 +4,15 @@ import feedparser
 from datetime import datetime, timedelta, timezone
 from telegram import Bot, LinkPreviewOptions
 
-# فقط importهای لازم بدون appwrite (فعلاً برای تست)
-# بعداً اگر کار کرد appwrite رو اضافه می‌کنیم
-
 async def main(event=None, context=None):
-    print("[INFO] شروع")
+    print("[START] زمان شروع:", datetime.utcnow().isoformat())
 
     token = os.environ.get('TELEGRAM_BOT_TOKEN')
     chat_id = os.environ.get('TELEGRAM_CHANNEL_ID')
 
     if not token or not chat_id:
-        print("[ERROR] توکن یا chat_id نیست")
-        return {"status": "error"}
+        print("[ERROR] توکن یا chat_id موجود نیست")
+        return {"status": "error", "reason": "missing env vars"}
 
     bot = Bot(token=token)
 
@@ -36,12 +33,14 @@ async def main(event=None, context=None):
         if posted:
             break
 
+        print(f"[FEED] شروع پردازش: {url}")
         try:
-            feed = feedparser.parse(url)
+            feed = await asyncio.wait_for(feedparser.parse(url), timeout=10)  # حداکثر ۱۰ ثانیه برای هر فید
             if not feed.entries:
+                print(f"[FEED] خالی: {url}")
                 continue
 
-            for entry in feed.entries:
+            for entry in feed.entries[:5]:  # فقط ۵ خبر اول هر فید (برای سرعت)
                 if posted:
                     break
 
@@ -77,36 +76,44 @@ async def main(event=None, context=None):
                             break
 
                 try:
+                    print(f"[SEND] تلاش برای ارسال: {title[:50]}...")
                     if image_url:
-                        await bot.send_photo(
-                            chat_id=chat_id,
-                            photo=image_url,
-                            caption=final_text,
-                            parse_mode='HTML',
-                            disable_notification=True
+                        await asyncio.wait_for(
+                            bot.send_photo(
+                                chat_id=chat_id,
+                                photo=image_url,
+                                caption=final_text,
+                                parse_mode='HTML',
+                                disable_notification=True
+                            ),
+                            timeout=15
                         )
                     else:
-                        await bot.send_message(
-                            chat_id=chat_id,
-                            text=final_text,
-                            parse_mode='HTML',
-                            link_preview_options=LinkPreviewOptions(is_disabled=False),
-                            disable_notification=True
+                        await asyncio.wait_for(
+                            bot.send_message(
+                                chat_id=chat_id,
+                                text=final_text,
+                                parse_mode='HTML',
+                                link_preview_options=LinkPreviewOptions(is_disabled=False),
+                                disable_notification=True
+                            ),
+                            timeout=15
                         )
 
                     posted = True
-                    print(f"[SUCCESS] ارسال شد: {title[:70]}")
+                    print(f"[SUCCESS] ارسال موفق: {title[:70]} (لینک: {link})")
 
-                    # اینجا فقط چاپ می‌کنیم (دیتابیس فعلاً کامنت)
-                    print(f"[DB] لینک باید ذخیره شود: {link}")
+                except asyncio.TimeoutError:
+                    print("[TIMEOUT] ارسال به تلگرام تایم‌اوت شد")
+                except Exception as send_err:
+                    print(f"[ERROR] خطا در ارسال: {str(send_err)}")
 
-                except Exception as e:
-                    print(f"[ERROR] ارسال شکست: {str(e)}")
+        except asyncio.TimeoutError:
+            print(f"[TIMEOUT] فید {url} تایم‌اوت شد")
+        except Exception as feed_err:
+            print(f"[ERROR] مشکل در فید {url}: {str(feed_err)}")
 
-        except Exception as e:
-            print(f"[ERROR] فید {url}: {str(e)}")
-
-    print(f"[INFO] پایان - ارسال شد: {posted}")
+    print(f"[INFO] پایان اجرا - ارسال شد: {posted}")
     return {"status": "success", "posted": posted}
 
 
