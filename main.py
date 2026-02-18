@@ -12,7 +12,7 @@ async def main(event=None, context=None):
 
     if not token or not chat_id:
         print("[ERROR] توکن یا chat_id موجود نیست")
-        return {"status": "error", "reason": "missing env vars"}
+        return {"status": "error"}
 
     bot = Bot(token=token)
 
@@ -34,13 +34,16 @@ async def main(event=None, context=None):
             break
 
         print(f"[FEED] شروع پردازش: {url}")
+
         try:
-            feed = await asyncio.wait_for(feedparser.parse(url), timeout=10)  # حداکثر ۱۰ ثانیه برای هر فید
+            # بدون await – feedparser.parse سینکرون است
+            feed = feedparser.parse(url)
+
             if not feed.entries:
                 print(f"[FEED] خالی: {url}")
                 continue
 
-            for entry in feed.entries[:5]:  # فقط ۵ خبر اول هر فید (برای سرعت)
+            for entry in feed.entries[:5]:  # محدود به ۵ خبر برای سرعت
                 if posted:
                     break
 
@@ -78,38 +81,28 @@ async def main(event=None, context=None):
                 try:
                     print(f"[SEND] تلاش برای ارسال: {title[:50]}...")
                     if image_url:
-                        await asyncio.wait_for(
-                            bot.send_photo(
-                                chat_id=chat_id,
-                                photo=image_url,
-                                caption=final_text,
-                                parse_mode='HTML',
-                                disable_notification=True
-                            ),
-                            timeout=15
+                        await bot.send_photo(
+                            chat_id=chat_id,
+                            photo=image_url,
+                            caption=final_text,
+                            parse_mode='HTML',
+                            disable_notification=True
                         )
                     else:
-                        await asyncio.wait_for(
-                            bot.send_message(
-                                chat_id=chat_id,
-                                text=final_text,
-                                parse_mode='HTML',
-                                link_preview_options=LinkPreviewOptions(is_disabled=False),
-                                disable_notification=True
-                            ),
-                            timeout=15
+                        await bot.send_message(
+                            chat_id=chat_id,
+                            text=final_text,
+                            parse_mode='HTML',
+                            link_preview_options=LinkPreviewOptions(is_disabled=False),
+                            disable_notification=True
                         )
 
                     posted = True
                     print(f"[SUCCESS] ارسال موفق: {title[:70]} (لینک: {link})")
 
-                except asyncio.TimeoutError:
-                    print("[TIMEOUT] ارسال به تلگرام تایم‌اوت شد")
                 except Exception as send_err:
                     print(f"[ERROR] خطا در ارسال: {str(send_err)}")
 
-        except asyncio.TimeoutError:
-            print(f"[TIMEOUT] فید {url} تایم‌اوت شد")
         except Exception as feed_err:
             print(f"[ERROR] مشکل در فید {url}: {str(feed_err)}")
 
