@@ -4,14 +4,17 @@ import feedparser
 from datetime import datetime, timedelta, timezone
 from telegram import Bot, LinkPreviewOptions
 
+# فقط importهای لازم بدون appwrite (فعلاً برای تست)
+# بعداً اگر کار کرد appwrite رو اضافه می‌کنیم
+
 async def main(event=None, context=None):
-    print("[INFO] شروع چک RSS و ارسال خبر")
+    print("[INFO] شروع")
 
     token = os.environ.get('TELEGRAM_BOT_TOKEN')
     chat_id = os.environ.get('TELEGRAM_CHANNEL_ID')
 
     if not token or not chat_id:
-        print("[ERROR] توکن یا chat_id موجود نیست")
+        print("[ERROR] توکن یا chat_id نیست")
         return {"status": "error"}
 
     bot = Bot(token=token)
@@ -36,7 +39,6 @@ async def main(event=None, context=None):
         try:
             feed = feedparser.parse(url)
             if not feed.entries:
-                print(f"[INFO] فید خالی: {url}")
                 continue
 
             for entry in feed.entries:
@@ -58,12 +60,11 @@ async def main(event=None, context=None):
 
                 description = (entry.get('summary') or entry.get('description') or "").strip()
 
-                # فرمت دقیق درخواستی
                 final_text = (
                     f"{title}\n\n"
                     f"@candidatoryiran\n\n"
                     f"{description}\n\n"
-                    f"کانال خبری کاندیداتوری"
+                    f"@candidatoryiran - کانال خبری کاندیداتوری"
                 )
 
                 image_url = None
@@ -94,15 +95,18 @@ async def main(event=None, context=None):
                         )
 
                     posted = True
-                    print(f"[SUCCESS] ارسال موفق: {title[:70]} (لینک: {link})")
+                    print(f"[SUCCESS] ارسال شد: {title[:70]}")
 
-                except Exception as send_err:
-                    print(f"[ERROR] خطا در ارسال: {str(send_err)}")
+                    # اینجا فقط چاپ می‌کنیم (دیتابیس فعلاً کامنت)
+                    print(f"[DB] لینک باید ذخیره شود: {link}")
 
-        except Exception as feed_err:
-            print(f"[ERROR] مشکل در فید {url}: {str(feed_err)}")
+                except Exception as e:
+                    print(f"[ERROR] ارسال شکست: {str(e)}")
 
-    print(f"[INFO] پایان اجرا - ارسال شد: {posted}")
+        except Exception as e:
+            print(f"[ERROR] فید {url}: {str(e)}")
+
+    print(f"[INFO] پایان - ارسال شد: {posted}")
     return {"status": "success", "posted": posted}
 
 
