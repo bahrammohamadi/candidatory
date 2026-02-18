@@ -2,6 +2,7 @@ import os
 import asyncio
 import feedparser
 import requests
+import hashlib
 from datetime import datetime, timedelta, timezone
 from telegram import Bot, LinkPreviewOptions
 
@@ -69,21 +70,43 @@ async def main(event=None, context=None):
 
                 description = (entry.get('summary') or entry.get('description') or "").strip()
 
-                # چک تکراری با HTTP
+                # ساخت hash برای تشخیص محتوای مشابه
+                content_for_hash = (title.lower().strip() + " " + description[:150].lower().strip())
+                content_hash = hashlib.sha256(content_for_hash.encode('utf-8')).hexdigest()
+
+                # چک تکراری (لینک یا hash)
                 is_duplicate = False
                 try:
-                    params = {'queries[0]': f'equal("link", ["{link}"])', 'limit': 1}
-                    res = requests.get(
+                    # چک لینک
+                    params_link = {'queries[0]': f'equal("link", ["{link}"])', 'limit': 1}
+                    res_link = requests.get(
                         f"{endpoint}/databases/{database_id}/collections/{collection_id}/documents",
                         headers=headers,
-                        params=params
+                        params=params_link
                     )
-                    if res.status_code != 200:
-                        print(f"[WARN] خطا در درخواست لیست داکیومنت‌ها: {res.status_code} - {res.text}")
-                    data = res.json()
-                    if data.get('total', 0) > 0:
-                        is_duplicate = True
-                        print(f"[SKIP] تکراری: {title[:70]}")
+                    if res_link.status_code == 200:
+                        data_link = res_link.json()
+                        if data_link.get('total', 0) > 0:
+                            is_duplicate = True
+                            print(f"[SKIP] تکراری (لینک): {title[:70]}")
+
+                    # اگر لینک تکراری نبود، چک hash کنیم
+                    if not is_duplicate:
+                        params_hash = {'queries[0]': f'equal("content_hash", ["{content_hash}"])', 'limit': 1}
+                        res_hash = requests.get(
+                            f"{endpoint}/databases/{database_id}/collections/{collection_id}/documents",
+                            headers=headers,
+                            params=params_hash
+                        )
+                        if res_hash.status_code == 200:
+                            data_hash = res_hash.json()
+                            if data_hash.get('total', 0) > 0:
+                                is_duplicate = True
+                                print(f"[SKIP] تکراری (محتوا): {title[:70]}")
+                        else:
+                            print(f"[WARN] خطا در درخواست hash: {res_hash.status_code} - {res_hash.text}")
+                    else:
+                        print(f"[WARN] خطا در درخواست لینک: {res_link.status_code} - {res_link.text}")
                 except Exception as e:
                     print(f"[WARN] خطا در چک تکراری: {str(e)} - ادامه بدون چک")
 
@@ -130,13 +153,14 @@ async def main(event=None, context=None):
                     posted = True
                     print(f"[SUCCESS] ارسال موفق: {title[:70]}")
 
-                    # ذخیره لینک با HTTP
+                    # ذخیره لینک و hash با HTTP
                     try:
                         payload = {
                             'documentId': 'unique()',
                             'data': {
                                 'link': link,
                                 'title': title[:300],
+                                'content_hash': content_hash,
                                 'created_at': now.isoformat()
                             }
                         }
@@ -146,7 +170,7 @@ async def main(event=None, context=None):
                             json=payload
                         )
                         if res.status_code in (200, 201):
-                            print("[DB] لینک ذخیره شد")
+                            print("[DB] لینک و hash ذخیره شد")
                         else:
                             print(f"[WARN] ذخیره دیتابیس شکست: {res.status_code} - {res.text}")
                     except Exception as save_err:
