@@ -8,7 +8,7 @@ from appwrite.services.databases import Databases
 from appwrite.query import Query
 
 async def main(event=None, context=None):
-    print("[INFO] شروع")
+    print("[INFO] شروع اجرای اتوماسیون")
 
     token = os.environ.get('TELEGRAM_BOT_TOKEN')
     chat_id = os.environ.get('TELEGRAM_CHANNEL_ID')
@@ -127,7 +127,7 @@ async def main(event=None, context=None):
                     posted = True
                     print(f"[SUCCESS] ارسال موفق: {title[:70]}")
 
-                    # ذخیره لینک در دیتابیس
+                    # ذخیره در دیتابیس
                     try:
                         databases.create_document(
                             database_id=database_id,
@@ -135,7 +135,7 @@ async def main(event=None, context=None):
                             document_id='unique()',
                             data={
                                 'link': link,
-                                'title': title[:300],  # محدود به سایز ستون
+                                'title': title[:300],
                                 'created_at': now.isoformat()
                             }
                         )
