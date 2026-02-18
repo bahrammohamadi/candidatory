@@ -1,14 +1,12 @@
 import os
 import asyncio
 import feedparser
+import requests
 from datetime import datetime, timedelta, timezone
 from telegram import Bot, LinkPreviewOptions
-from appwrite.client import Client
-from appwrite.services.databases import Databases
-from appwrite.query import Query
 
 async def main(event=None, context=None):
-    print("[INFO] شروع اجرای اتوماسیون")
+    print("[INFO] شروع")
 
     token = os.environ.get('TELEGRAM_BOT_TOKEN')
     chat_id = os.environ.get('TELEGRAM_CHANNEL_ID')
@@ -22,14 +20,13 @@ async def main(event=None, context=None):
         print("[ERROR] متغیرهای محیطی ناقص")
         return {"status": "error"}
 
-    client = Client()
-    client.set_endpoint(endpoint)
-    client.set_project(project)
-    client.set_key(key)
-
-    databases = Databases(client)
-
     bot = Bot(token=token)
+
+    headers = {
+        'Content-Type': 'application/json',
+        'X-Appwrite-Project': project,
+        'X-Appwrite-Key': key,
+    }
 
     rss_feeds = [
         "https://www.farsnews.ir/rss",
@@ -72,20 +69,21 @@ async def main(event=None, context=None):
 
                 description = (entry.get('summary') or entry.get('description') or "").strip()
 
-                # چک تکراری
+                # چک تکراری با HTTP
                 is_duplicate = False
                 try:
-                    res = databases.list_documents(
-                        database_id=database_id,
-                        collection_id=collection_id,
-                        queries=[Query.equal("link", link)],
-                        limit=1
+                    params = {'queries[]': f'equal("link", "{link}")', 'limit': 1}
+                    res = requests.get(
+                        f"{endpoint}/databases/{database_id}/collections/{collection_id}/documents",
+                        headers=headers,
+                        params=params
                     )
-                    if res.get('total', 0) > 0:
+                    data = res.json()
+                    if data.get('total', 0) > 0:
                         is_duplicate = True
                         print(f"[SKIP] تکراری: {title[:70]}")
                 except Exception as e:
-                    print(f"[WARN] خطا در چک دیتابیس: {str(e)} - ادامه بدون چک")
+                    print(f"[WARN] خطا در چک تکراری: {str(e)} - ادامه بدون چک")
 
                 if is_duplicate:
                     continue
@@ -127,19 +125,25 @@ async def main(event=None, context=None):
                     posted = True
                     print(f"[SUCCESS] ارسال موفق: {title[:70]}")
 
-                    # ذخیره در دیتابیس
+                    # ذخیره لینک با HTTP
                     try:
-                        databases.create_document(
-                            database_id=database_id,
-                            collection_id=collection_id,
-                            document_id='unique()',
-                            data={
+                        payload = {
+                            'documentId': 'unique()',
+                            'data': {
                                 'link': link,
                                 'title': title[:300],
                                 'created_at': now.isoformat()
                             }
+                        }
+                        res = requests.post(
+                            f"{endpoint}/databases/{database_id}/collections/{collection_id}/documents",
+                            headers=headers,
+                            json=payload
                         )
-                        print("[DB] لینک ذخیره شد")
+                        if res.status_code in (200, 201):
+                            print("[DB] لینک ذخیره شد")
+                        else:
+                            print(f"[WARN] ذخیره دیتابیس شکست: {res.status_code} - {res.text}")
                     except Exception as save_err:
                         print(f"[WARN] خطا در ذخیره دیتابیس: {str(save_err)}")
 
