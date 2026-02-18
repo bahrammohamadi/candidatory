@@ -72,12 +72,14 @@ async def main(event=None, context=None):
                 # چک تکراری با HTTP
                 is_duplicate = False
                 try:
-                    params = {'queries[]': f'equal("link", "{link}")', 'limit': 1}
+                    params = {'queries[0]': f'equal("link", ["{link}"])', 'limit': 1}
                     res = requests.get(
                         f"{endpoint}/databases/{database_id}/collections/{collection_id}/documents",
                         headers=headers,
                         params=params
                     )
+                    if res.status_code != 200:
+                        print(f"[WARN] خطا در درخواست لیست داکیومنت‌ها: {res.status_code} - {res.text}")
                     data = res.json()
                     if data.get('total', 0) > 0:
                         is_duplicate = True
@@ -92,9 +94,10 @@ async def main(event=None, context=None):
                     f"{title}\n\n"
                     f"@candidatoryiran\n\n"
                     f"{description}\n\n"
-                    f" کانال خبری کاندیداتوری \n"
-                    f"🆔 @candidatoryiran\n"
-                    f"🆔 Instagram.com/candidatory.ir\n"
+                    f"_____________\n"
+                    f"کانال خبری کاندیداتوری\n"
+                    f"@candidatoryiran\n"
+                    f"Instagram.com/candidatory.ir\n"
                 )
 
                 image_url = None
