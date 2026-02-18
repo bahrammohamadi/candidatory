@@ -94,7 +94,6 @@ async def main(event=None, context=None):
                     print(f"[WARN] خطا در چک تکراری: {str(e)} - ادامه بدون چک")
                 if is_duplicate:
                     continue
-
                 final_text = (
                     f"💠 <b>{title}</b>\n\n"
                     f"@candidatoryiran\n\n"
@@ -108,7 +107,7 @@ async def main(event=None, context=None):
                 image_url = None
 
                 # روش ۱: enclosure (استاندارد)
-                if 'enclosure' in entry and entry.enclosure.get('type', '').startswith('image/'):
+                if 'enclosure' in entry and entry.enclosure and entry.enclosure.get('type', '').startswith('image/'):
                     image_url = entry.enclosure.href
 
                 # روش ۲: media_content (استاندارد)
@@ -131,19 +130,28 @@ async def main(event=None, context=None):
                         if start > 4 and end > start:
                             image_url = desc[start:end]
 
-                # روش ۵: داخل content:encoded به صورت <img src="...">
-                elif 'content' in entry and entry.content and 'value' in entry.content[0]:
-                    content = entry.content[0]['value']
+                # روش ۵: داخل content:encoded یا content[0].value به صورت <img src="...">
+                elif 'content' in entry and entry.content:
+                    content = entry.content[0].get('value', '')
                     if '<img ' in content:
                         start = content.find('src="') + 5
                         end = content.find('"', start)
                         if start > 4 and end > start:
                             image_url = content[start:end]
 
-                # اگر هیچ روشی عکس پیدا نکرد → عکس پیش‌فرض (اختیاری - لینک خودت رو بگذار)
+                # روش ۶: داخل media:group یا media:group.media:content (گاهی در تسنیم/مهر)
+                elif 'media_group' in entry:
+                    for group in entry.media_group:
+                        if 'media_content' in group:
+                            for media in group.media_content:
+                                if media.get('medium') == 'image' and media.get('url'):
+                                    image_url = media['url']
+                                    break
+
+                # اگر هیچ روشی عکس پیدا نکرد → عکس پیش‌فرض (حتماً لینک واقعی بگذار)
                 if not image_url:
-                    image_url = "https://example.com/fallback-news-image.jpg"  # ← لینک عکس ثابت خودت
-                    print(f"[FALLBACK] عکس پیش‌فرض برای خبر: {title[:50]}")
+                    image_url = "https://example.com/fallback-news-image.jpg"  # ← لینک عکس ثابت خودت رو اینجا بگذار
+                    print(f"[FALLBACK] عکس پیش‌فرض استفاده شد برای: {title[:50]}")
 
                 try:
                     # همیشه با send_photo ارسال می‌شود (حتی اگر عکس پیش‌فرض باشد)
