@@ -63,7 +63,7 @@ async def main(event=None, context=None):
                     f"{title}\n\n"
                     f"@candidatoryiran\n\n"
                     f"{description}\n\n"
-                    f"@candidatoryiran - کانال خبری کاندیداتوری"
+                    f"کانال خبری کاندیداتوری"
                 )
 
                 image_url = None
