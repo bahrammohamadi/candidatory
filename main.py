@@ -114,13 +114,13 @@ async def main(event=None, context=None):
                     continue
 
                 final_text = (
-                    f"{title}\n\n"
+                    f"💠 <b>{title}</b>\n\n"
                     f"@candidatoryiran\n\n"
                     f"{description}\n\n"
-                    f"_____________\n"
+                    f"🇮🇷🇮🇷🇮🇷🇮🇷🇮🇷🇮🇷🇮🇷\n"
                     f"کانال خبری کاندیداتوری\n"
-                    f"@candidatoryiran\n"
-                    f"Instagram.com/candidatory.ir\n"
+                    f"🆔 @candidatoryiran\n"
+                    f"🆔 Instagram.com/candidatory.ir\n"
                 )
 
                 image_url = None
