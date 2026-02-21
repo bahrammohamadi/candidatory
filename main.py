@@ -1,30 +1,33 @@
 # ============================================================
 # Telegram Election News Bot — @candidatoryiran
-# Version:    1.1 — Timeout Fix (408 → solved)
+# Version:    2.0 — Bulletproof Deduplication + Caption in Image
 # Runtime:    Python 3.12 / Appwrite Cloud Functions
 # Timeout:    30 seconds (Appwrite free plan limit)
+#
+# DEDUP STRATEGY (v2.0):
+#   1. content_hash = SHA-256 of sorted normalized title tokens
+#      (description excluded — it varies across sources)
+#   2. content_hash used as Appwrite document ID
+#      → Appwrite enforces uniqueness atomically (409 on conflict)
+#   3. DB save happens BEFORE Telegram post
+#      → race condition window = zero
+#   4. In-process posted_hashes set prevents same-run duplicates
+#   5. Fuzzy check uses overlap coefficient + Jaccard
+#   6. ZWNJ removed (not replaced with space) for consistent tokens
+#
+# POST FORMAT (v2.0):
+#   Images + caption in ONE atomic message (no separate text)
+#   Hashtags generated from content, placed after title
 #
 # TIMEOUT STRATEGY:
 #   All network I/O runs in executor (non-blocking).
 #   All feeds fetched in parallel via asyncio.gather().
 #   Hard budget per phase:
-#     Feed fetch total:  12s  (all feeds in parallel)
-#     Image scraping:     5s  (per article, parallel)
-#     DB operations:      3s  (per query)
-#     Telegram posting:   8s  (per post)
+#     Feed fetch total:  12s
+#     Image scraping:     5s
+#     DB operations:      3s
+#     Telegram posting:   8s
 #   Total worst case: ~28s — safely under 30s limit.
-#
-# POST FLOW:
-#   ① fetch_all_feeds() — parallel, 12s hard budget
-#   ② election_filter() — scoring-based, in-memory (instant)
-#   ③ time_filter()     — 24h window
-#   ④ is_duplicate()    — DB check, 3s timeout
-#   ⑤ collect_images()  — parallel scrape, 5s timeout
-#   ⑥ send_media_group(images, NO caption)
-#   ⑦ sleep(2.0s)
-#   ⑧ send_message(caption, reply_to=anchor)
-#   ⑨ save_to_db()
-#   ⑩ sleep(2.0s) inter-post delay
 # ============================================================
 
 import os
@@ -60,21 +63,20 @@ RSS_SOURCES: list[tuple[str, str]] = [
 ]
 
 # ── Time budget constants (seconds) ──
-FEED_FETCH_TIMEOUT   = 6    # per individual feed HTTP request
-FEEDS_TOTAL_TIMEOUT  = 12   # all feeds in parallel must finish within this
-DB_TIMEOUT           = 3    # per Appwrite HTTP request
-IMAGE_SCRAPE_TIMEOUT = 5    # all image scraping for one article
-TELEGRAM_TIMEOUT     = 8    # per Telegram API call
-ALBUM_CAPTION_DELAY  = 2.0  # between album and caption
-INTER_POST_DELAY     = 2.0  # between consecutive posts
+FEED_FETCH_TIMEOUT   = 6
+FEEDS_TOTAL_TIMEOUT  = 12
+DB_TIMEOUT           = 3
+IMAGE_SCRAPE_TIMEOUT = 5
+TELEGRAM_TIMEOUT     = 8
+INTER_POST_DELAY     = 2.0
 
 # ── Content limits ──
 MAX_IMAGES            = 5
 MAX_DESCRIPTION_CHARS = 500
-CAPTION_MAX           = 4096
+CAPTION_MAX           = 1024
 HOURS_THRESHOLD       = 24
 ELECTION_SCORE_PASS   = 2
-FUZZY_THRESHOLD       = 0.75
+FUZZY_THRESHOLD       = 0.60
 
 # ── Image filters ──
 IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.webp')
@@ -121,6 +123,33 @@ PERSIAN_STOPWORDS = {
     "to", "for", "and", "or", "but", "with", "on",
 }
 
+# ── Hashtag mapping ──
+_HASHTAG_MAP = [
+    ("انتخابات",       "#انتخابات"),
+    ("ریاست",          "#ریاست_جمهوری"),
+    ("ریاستجمهوری",    "#ریاست_جمهوری"),
+    ("مجلس",           "#مجلس"),
+    ("شورا",           "#شورای_شهر"),
+    ("کاندیدا",        "#کاندیدا"),
+    ("نامزد",          "#نامزد_انتخاباتی"),
+    ("ثبتنام",         "#ثبت_نام"),
+    ("صلاحیت",         "#صلاحیت"),
+    ("شورای نگهبان",   "#شورای_نگهبان"),
+    ("رای",            "#رأی"),
+    ("مناظره",         "#مناظره"),
+    ("تبلیغات",        "#تبلیغات_انتخاباتی"),
+    ("مشارکت",         "#مشارکت"),
+    ("صندوق",          "#صندوق_رأی"),
+    ("نماینده",        "#نمایندگان"),
+    ("اصلاحطلب",       "#اصلاح_طلبان"),
+    ("اصولگرا",        "#اصولگرایان"),
+    ("election",       "#Election"),
+    ("candidate",      "#Candidate"),
+    ("parliament",     "#Parliament"),
+    ("vote",           "#Vote"),
+    ("presidential",   "#Presidential"),
+]
+
 
 # ═══════════════════════════════════════════════════════════
 # SECTION 2 — MAIN ENTRY POINT
@@ -128,7 +157,7 @@ PERSIAN_STOPWORDS = {
 
 async def main(event=None, context=None):
     print("[INFO] ══════════════════════════════")
-    print("[INFO] Election Bot v1.1 started")
+    print("[INFO] Election Bot v2.0 started")
     print(f"[INFO] {datetime.now(timezone.utc).isoformat()}")
     print("[INFO] ══════════════════════════════")
 
@@ -159,8 +188,6 @@ async def main(event=None, context=None):
     }
 
     # ── Phase 1: Fetch ALL feeds in parallel ──────────────────
-    # All feeds run simultaneously. Total wall time = slowest feed,
-    # not sum of all feeds. Hard timeout = FEEDS_TOTAL_TIMEOUT.
     print(f"[INFO] Fetching {len(RSS_SOURCES)} feeds in parallel...")
     try:
         all_entries: list[dict] = await asyncio.wait_for(
@@ -168,7 +195,7 @@ async def main(event=None, context=None):
             timeout=FEEDS_TOTAL_TIMEOUT,
         )
     except asyncio.TimeoutError:
-        print(f"[WARN] Feed fetch timed out after {FEEDS_TOTAL_TIMEOUT}s — using partial results")
+        print(f"[WARN] Feed fetch timed out after {FEEDS_TOTAL_TIMEOUT}s")
         all_entries = []
 
     print(f"[INFO] Total entries collected: {len(all_entries)}")
@@ -178,10 +205,12 @@ async def main(event=None, context=None):
         return {"status": "success", "posted": 0}
 
     # ── Sort newest first ──
-    all_entries.sort(key=lambda x: x["pub_date"] or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+    all_entries.sort(
+        key=lambda x: x["pub_date"] or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    )
 
     # ── Phase 2: Load recent DB records for fuzzy check ──────
-    # Single DB call — load once, check in memory per article.
     recent_records: list[dict] = []
     try:
         recent_records = await asyncio.wait_for(
@@ -190,18 +219,17 @@ async def main(event=None, context=None):
         )
         print(f"[INFO] {len(recent_records)} recent records for fuzzy check.")
     except asyncio.TimeoutError:
-        print("[WARN] DB load_recent timed out — fuzzy check disabled this run.")
+        print("[WARN] DB load_recent timed out — fuzzy check disabled.")
+
+    # ── In-process dedup set ──
+    posted_hashes: set[str] = set()
 
     # ── Phase 3: Filter + post each candidate ────────────────
     for item in all_entries:
-        # Hard stop: if we are within 4s of total budget, stop.
-        # (Appwrite measures from function start, not this point.)
-        # We trust the per-phase timeouts to keep us safe.
-
-        title   = item["title"]
-        link    = item["link"]
-        desc    = item["desc"]
-        source  = item["source"]
+        title    = item["title"]
+        link     = item["link"]
+        desc     = item["desc"]
+        source   = item["source"]
         pub_date = item["pub_date"]
 
         stats["fetched"] += 1
@@ -218,8 +246,14 @@ async def main(event=None, context=None):
             print(f"[SKIP:topic] score={score} [{source}] {title[:50]}")
             continue
 
-        # ── Duplicate check: DB (link + hash) ──
-        content_hash = _make_hash(title, desc)
+        # ── Duplicate check 0: in-process set ──
+        content_hash = _make_hash(title)
+        if content_hash in posted_hashes:
+            stats["skip_dupe"] += 1
+            print(f"[SKIP:dupe:local] [{source}] {title[:50]}")
+            continue
+
+        # ── Duplicate check 1: DB (link + hash) ──
         try:
             is_dup = await asyncio.wait_for(
                 loop.run_in_executor(None, db.is_duplicate, link, content_hash),
@@ -235,7 +269,7 @@ async def main(event=None, context=None):
             print(f"[SKIP:dupe:db] [{source}] {title[:50]}")
             continue
 
-        # ── Duplicate check: fuzzy in-memory ──
+        # ── Duplicate check 2: fuzzy in-memory ──
         if _is_fuzzy_duplicate(title, recent_records):
             stats["skip_dupe"] += 1
             print(f"[SKIP:dupe:fuzzy] [{source}] {title[:50]}")
@@ -243,7 +277,29 @@ async def main(event=None, context=None):
 
         print(f"[PASS] score={score} [{source}] {title[:50]}")
 
-        # ── Collect images (parallel, timeout-guarded) ──
+        # ── SAVE TO DB BEFORE POSTING (race-condition killer) ──
+        try:
+            saved = await asyncio.wait_for(
+                loop.run_in_executor(
+                    None, db.save,
+                    link, title, content_hash, source, now.isoformat()
+                ),
+                timeout=DB_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            print("[WARN] DB save timed out — skipping post to prevent dupe.")
+            stats["errors"] += 1
+            continue
+
+        if not saved:
+            print("[WARN] DB save failed (409 or error) — skipping post.")
+            stats["skip_dupe"] += 1
+            continue
+
+        # ── Mark in local set immediately ──
+        posted_hashes.add(content_hash)
+
+        # ── Collect images ──
         try:
             image_urls: list[str] = await asyncio.wait_for(
                 _collect_images_async(item["entry"], link, loop),
@@ -253,8 +309,9 @@ async def main(event=None, context=None):
             print("[WARN] Image scrape timed out — posting without images.")
             image_urls = []
 
-        # ── Build caption ──
-        caption = _build_caption(title, desc)
+        # ── Build caption with hashtags ──
+        hashtags = _generate_hashtags(title, desc)
+        caption  = _build_caption(title, desc, hashtags)
 
         # ── Post to Telegram ──
         try:
@@ -270,27 +327,13 @@ async def main(event=None, context=None):
             stats["posted"] += 1
             print(f"[SUCCESS] [{source}] {title[:50]} (post #{stats['posted']})")
 
-            # Save to DB
-            try:
-                await asyncio.wait_for(
-                    loop.run_in_executor(
-                        None, db.save,
-                        link, title, content_hash, source, now.isoformat()
-                    ),
-                    timeout=DB_TIMEOUT,
-                )
-            except asyncio.TimeoutError:
-                print("[WARN] DB save timed out — record not saved.")
-
             # Update local fuzzy set
             recent_records.append({
                 "title":      title,
                 "title_norm": _normalize_text(title),
             })
 
-            # Inter-post delay (Telegram flood protection)
             await asyncio.sleep(INTER_POST_DELAY)
-
         else:
             stats["errors"] += 1
 
@@ -312,12 +355,6 @@ async def main(event=None, context=None):
 # ═══════════════════════════════════════════════════════════
 
 async def _fetch_all_feeds_parallel(loop: asyncio.AbstractEventLoop) -> list[dict]:
-    """
-    Fetch all RSS feeds simultaneously using asyncio.gather().
-    Each feed runs in a thread executor so requests.get() does not
-    block the event loop.
-    Wall time = max(individual feed times), not sum.
-    """
     tasks = [
         loop.run_in_executor(None, _fetch_one_feed, url, name)
         for url, name in RSS_SOURCES
@@ -337,16 +374,12 @@ async def _fetch_all_feeds_parallel(loop: asyncio.AbstractEventLoop) -> list[dic
 
 
 def _fetch_one_feed(url: str, source_name: str) -> list[dict]:
-    """
-    Blocking function — runs in executor thread.
-    Fetches one RSS feed and returns parsed entry dicts.
-    """
     try:
         resp = requests.get(
             url,
             timeout=FEED_FETCH_TIMEOUT,
             headers={
-                "User-Agent": "Mozilla/5.0 (compatible; ElectionBot/1.1)",
+                "User-Agent": "Mozilla/5.0 (compatible; ElectionBot/2.0)",
                 "Accept":     "application/rss+xml, application/xml, */*",
             },
         )
@@ -380,7 +413,7 @@ def _fetch_one_feed(url: str, source_name: str) -> list[dict]:
                 "desc":     desc,
                 "pub_date": pub_date,
                 "source":   source_name,
-                "entry":    entry,   # kept for image extraction
+                "entry":    entry,
             })
 
         print(f"[FEED] {source_name}: {len(entries)} entries")
@@ -399,10 +432,6 @@ def _fetch_one_feed(url: str, source_name: str) -> list[dict]:
 # ═══════════════════════════════════════════════════════════
 
 class _AppwriteDB:
-    """
-    All methods are synchronous (blocking) — call via run_in_executor.
-    """
-
     def __init__(self, endpoint, project, key, database_id, collection_id):
         self._url = (
             f"{endpoint}/databases/{database_id}"
@@ -444,7 +473,7 @@ class _AppwriteDB:
 
     def save(self, link: str, title: str, content_hash: str,
              source: str, created_at: str) -> bool:
-        doc_id = hashlib.md5(link.encode()).hexdigest()[:20]
+        doc_id = content_hash[:36]
         try:
             resp = requests.post(
                 self._url,
@@ -461,10 +490,13 @@ class _AppwriteDB:
                 },
                 timeout=DB_TIMEOUT,
             )
-            ok = resp.status_code in (200, 201)
-            if not ok:
-                print(f"[WARN] DB save {resp.status_code}")
-            return ok
+            if resp.status_code in (200, 201):
+                return True
+            if resp.status_code == 409:
+                print(f"[INFO] DB 409 — already exists (race won by other execution)")
+                return False
+            print(f"[WARN] DB save {resp.status_code}: {resp.text[:200]}")
+            return False
         except Exception as e:
             print(f"[WARN] DB save: {e}")
             return False
@@ -559,7 +591,6 @@ def _escape_html(text: str) -> str:
 
 
 def _normalize_text(text: str) -> str:
-    """Full Persian normalization for duplicate detection."""
     if not text:
         return ""
     # Arabic → Persian
@@ -569,8 +600,9 @@ def _normalize_text(text: str) -> str:
     text = text.replace("ئ", "ی").replace("ى", "ی")
     # Remove diacritics
     text = re.sub(r"[\u064B-\u065F\u0670]", "", text)
-    # Zero-width chars
-    text = re.sub(r"[\u200c\u200d\u200e\u200f\ufeff]", " ", text)
+    # ZWNJ/ZWJ: REMOVE entirely (not replace with space)
+    # This ensures "ثبت‌نام" and "ثبتنام" become identical
+    text = re.sub(r"[\u200c\u200d\u200e\u200f\ufeff]", "", text)
     # Lowercase + remove punctuation
     text = text.lower()
     text = re.sub(r"[^\w\s\u0600-\u06FF]", " ", text)
@@ -583,9 +615,16 @@ def _normalize_text(text: str) -> str:
     return " ".join(tokens)
 
 
-def _make_hash(title: str, desc: str) -> str:
-    norm = f"{_normalize_text(title)} {_normalize_text(desc[:200])}"
-    return hashlib.sha256(norm.encode("utf-8")).hexdigest()
+def _make_hash(title: str, desc: str = "") -> str:
+    """
+    Hash based on normalized title ONLY with sorted tokens.
+    Description excluded — it varies across sources/updates.
+    Sorting makes "انتخابات مجلس آغاز" == "آغاز انتخابات مجلس".
+    """
+    norm_title = _normalize_text(title)
+    tokens = sorted(norm_title.split())
+    canonical = " ".join(tokens)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 # ═══════════════════════════════════════════════════════════
@@ -593,15 +632,6 @@ def _make_hash(title: str, desc: str) -> str:
 # ═══════════════════════════════════════════════════════════
 
 def _election_score(title: str, desc: str) -> int:
-    """
-    Scoring:
-      Hard reject keyword found          → -1 (always fail)
-      High-weight keyword in title       → +3
-      High-weight keyword in desc only   → +1
-      Low-weight keyword in title        → +1
-      Low-weight keyword in desc only    → +0 (ignored for speed)
-    Threshold: ELECTION_SCORE_PASS = 2
-    """
     norm_title = _normalize_text(title)
     norm_desc  = _normalize_text(desc)
     combined   = norm_title + " " + norm_desc
@@ -638,22 +668,33 @@ def _is_fuzzy_duplicate(title: str, recent_records: list[dict]) -> bool:
     if not recent_records:
         return False
     incoming = set(_normalize_text(title).split())
-    if not incoming:
+    if len(incoming) < 2:
         return False
     for record in recent_records:
         stored = set(record.get("title_norm", "").split())
-        if not stored:
+        if len(stored) < 2:
             continue
         inter = len(incoming & stored)
+        if inter == 0:
+            continue
+
+        # Overlap coefficient: catches subset relationships
+        min_size = min(len(incoming), len(stored))
+        overlap = inter / min_size
+
+        # Jaccard: catches near-equal sets
         union = len(incoming | stored)
-        if union > 0 and inter / union >= FUZZY_THRESHOLD:
-            print(f"  [FUZZY] sim={inter/union:.2f}: {record.get('title','')[:40]}")
+        jaccard = inter / union
+
+        if overlap >= 0.75 or jaccard >= FUZZY_THRESHOLD:
+            print(f"  [FUZZY] overlap={overlap:.2f} jaccard={jaccard:.2f}: "
+                  f"{record.get('title','')[:40]}")
             return True
     return False
 
 
 # ═══════════════════════════════════════════════════════════
-# SECTION 9 — IMAGE COLLECTION (ASYNC, TIMEOUT-SAFE)
+# SECTION 9 — IMAGE COLLECTION
 # ═══════════════════════════════════════════════════════════
 
 async def _collect_images_async(
@@ -661,15 +702,8 @@ async def _collect_images_async(
     article_url: str,
     loop: asyncio.AbstractEventLoop,
 ) -> list[str]:
-    """
-    Wraps synchronous image collection in executor.
-    og:image fallback (page fetch) only runs if RSS yields nothing.
-    Both steps are individually timeout-guarded by the caller.
-    """
-    # Fast path: extract from RSS entry data (no network needed)
     images = _extract_rss_images(entry)
 
-    # Slow path: only if needed and we still have time budget
     if not images:
         try:
             og = await asyncio.wait_for(
@@ -679,7 +713,7 @@ async def _collect_images_async(
             if og:
                 images.append(og)
         except asyncio.TimeoutError:
-            print("  [WARN] og:image fetch timed out — skipping.")
+            print("  [WARN] og:image fetch timed out.")
 
     result = images[:MAX_IMAGES]
     print(f"  [INFO] Images: {len(result)}")
@@ -687,10 +721,6 @@ async def _collect_images_async(
 
 
 def _extract_rss_images(entry) -> list[str]:
-    """
-    Pure in-memory extraction from RSS entry fields.
-    No network calls. Returns list of image URLs.
-    """
     images: list[str] = []
     seen:   set[str]  = set()
 
@@ -760,7 +790,6 @@ def _extract_rss_images(entry) -> list[str]:
 
 
 def _fetch_og_image(url: str) -> str | None:
-    """Blocking — must be called via run_in_executor."""
     try:
         resp = requests.get(
             url,
@@ -786,15 +815,33 @@ def _fetch_og_image(url: str) -> str | None:
 
 
 # ═══════════════════════════════════════════════════════════
-# SECTION 10 — CAPTION BUILDER (EXACT ORIGINAL FORMAT)
+# SECTION 10 — HASHTAG GENERATOR + CAPTION BUILDER
 # ═══════════════════════════════════════════════════════════
 
-def _build_caption(title: str, desc: str) -> str:
+def _generate_hashtags(title: str, desc: str) -> list[str]:
+    norm = _normalize_text(title + " " + desc)
+    seen = set()
+    tags = []
+    for keyword, hashtag in _HASHTAG_MAP:
+        kw_norm = _normalize_text(keyword)
+        if kw_norm and kw_norm in norm and hashtag not in seen:
+            seen.add(hashtag)
+            tags.append(hashtag)
+        if len(tags) >= 5:
+            break
+    if "#انتخابات" not in seen:
+        tags.insert(0, "#انتخابات")
+    return tags
+
+
+def _build_caption(title: str, desc: str, hashtags: list[str] = None) -> str:
     safe_title = _escape_html(title.strip())
     safe_desc  = _escape_html(desc.strip())
+    hashtag_line = " ".join(hashtags) if hashtags else "#انتخابات"
 
     caption = (
         f"💠 <b>{safe_title}</b>\n\n"
+        f"{hashtag_line}\n\n"
         f"@candidatoryiran\n\n"
         f"{safe_desc}\n\n"
         f"🇮🇷🇮🇷🇮🇷🇮🇷🇮🇷🇮🇷🇮🇷\n"
@@ -806,8 +853,9 @@ def _build_caption(title: str, desc: str) -> str:
     if len(caption) > CAPTION_MAX:
         overflow  = len(caption) - CAPTION_MAX
         safe_desc = safe_desc[:max(0, len(safe_desc) - overflow - 5)] + "…"
-        caption   = (
+        caption = (
             f"💠 <b>{safe_title}</b>\n\n"
+            f"{hashtag_line}\n\n"
             f"@candidatoryiran\n\n"
             f"{safe_desc}\n\n"
             f"🇮🇷🇮🇷🇮🇷🇮🇷🇮🇷🇮🇷🇮🇷\n"
@@ -829,69 +877,66 @@ async def _post_to_telegram(
     image_urls: list[str],
     caption:    str,
 ) -> bool:
-    anchor_msg_id: int | None = None
+    """
+    Posts images with caption in ONE atomic message.
+    Caption is on the first image (album) or the single photo.
+    No separate text message. No delay between parts.
+    """
 
-    # ── Step ①: Images (no caption) ──
+    # ── Case A: Multiple images → album with caption on first ──
     if len(image_urls) >= 2:
         try:
-            media_group = [
-                InputMediaPhoto(media=url)
-                for url in image_urls[:MAX_IMAGES]
-            ]
+            media_group = []
+            for i, url in enumerate(image_urls[:MAX_IMAGES]):
+                if i == 0:
+                    media_group.append(InputMediaPhoto(
+                        media=url,
+                        caption=caption,
+                        parse_mode="HTML",
+                    ))
+                else:
+                    media_group.append(InputMediaPhoto(media=url))
+
             sent = await bot.send_media_group(
                 chat_id=chat_id,
                 media=media_group,
                 disable_notification=True,
             )
-            anchor_msg_id = sent[-1].message_id
-            print(f"  [INFO] ① Album: {len(sent)} images. anchor={anchor_msg_id}")
-        except TelegramError as e:
-            print(f"  [WARN] ① Album failed: {e}")
-            if image_urls:
-                try:
-                    sent = await bot.send_photo(
-                        chat_id=chat_id,
-                        photo=image_urls[0],
-                        disable_notification=True,
-                    )
-                    anchor_msg_id = sent.message_id
-                except TelegramError:
-                    pass
+            print(f"  [INFO] Album+caption: {len(sent)} images.")
+            return True
 
-    elif len(image_urls) == 1:
+        except TelegramError as e:
+            print(f"  [WARN] Album failed: {e} — falling back to single photo")
+            image_urls = image_urls[:1]
+
+    # ── Case B: Single image → photo with caption ──
+    if len(image_urls) == 1:
         try:
-            sent = await bot.send_photo(
+            await bot.send_photo(
                 chat_id=chat_id,
                 photo=image_urls[0],
+                caption=caption,
+                parse_mode="HTML",
                 disable_notification=True,
             )
-            anchor_msg_id = sent.message_id
-            print(f"  [INFO] ① Single photo. anchor={anchor_msg_id}")
+            print(f"  [INFO] Single photo+caption sent.")
+            return True
         except TelegramError as e:
-            print(f"  [WARN] ① Photo failed: {e}")
+            print(f"  [WARN] Photo failed: {e} — falling back to text only")
 
-    # ── Step ②: Delay ──
-    if anchor_msg_id is not None:
-        await asyncio.sleep(ALBUM_CAPTION_DELAY)
-
-    # ── Step ③: Caption (reply to anchor) ──
+    # ── Case C: No images → text only ──
     try:
-        kwargs: dict = {
-            "chat_id":              chat_id,
-            "text":                 caption,
-            "parse_mode":           "HTML",
-            "link_preview_options": LinkPreviewOptions(is_disabled=True),
-            "disable_notification": True,
-        }
-        if anchor_msg_id is not None:
-            kwargs["reply_to_message_id"] = anchor_msg_id
-
-        await bot.send_message(**kwargs)
-        print(f"  [INFO] ③ Caption sent.")
+        await bot.send_message(
+            chat_id=chat_id,
+            text=caption,
+            parse_mode="HTML",
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
+            disable_notification=True,
+        )
+        print(f"  [INFO] Text-only caption sent.")
         return True
-
     except TelegramError as e:
-        print(f"  [ERROR] ③ Caption failed: {e}")
+        print(f"  [ERROR] Text send failed: {e}")
         return False
 
 
