@@ -1,24 +1,33 @@
 # ============================================================
 # Telegram Election News Bot — @candidatoryiran
-# Version:    2.1 — Zero-Timeout + Bulletproof Dedup
+# Version:    2.2 — Schema Fix + Zero-Timeout + Bulletproof Dedup
 # Runtime:    Python 3.12 / Appwrite Cloud Functions
 # Timeout:    30 seconds (Appwrite free plan limit)
 #
-# TIMEOUT STRATEGY (v2.1):
+# DB SCHEMA (Appwrite collection "history"):
+#   $id            string (auto)
+#   link           string, required, size 700, indexed
+#   title          string, size 300
+#   site           string, size 100
+#   published_at   datetime
+#   created_at     datetime
+#   feed_url       string, size 500
+#   content_hash   string, size 128, indexed
+#
+# TIMEOUT STRATEGY:
 #   Global deadline = start + 27s (3s safety margin)
 #   Phase 1: Fetch feeds in parallel        → max 10s
 #   Phase 2: Load DB records ONCE           → max 3s
 #   Phase 3: Filter + post (loop)           → remaining budget
-#     - Dedup is 100% in-memory (zero DB queries per article)
-#     - DB save: 3s per article
-#     - Telegram post: 6s per article
-#     - Each iteration checks deadline before starting
+#     - ALL dedup is in-memory (zero DB queries per article)
+#     - DB save: 1 call per article (3s max)
+#     - Telegram post: 1 call per article (6s max)
 #
-# DEDUP STRATEGY (v2.1):
-#   1. Load ALL recent records once → build link_set + hash_set + fuzzy list
+# DEDUP STRATEGY:
+#   1. Load all recent records once → link_set + hash_set + fuzzy list
 #   2. In-memory checks only (zero per-article DB queries)
 #   3. content_hash = SHA-256 of sorted normalized title tokens
-#   4. content_hash used as Appwrite doc ID (409 on race conflict)
+#   4. content_hash[:36] used as Appwrite doc ID (409 on conflict)
 #   5. Save to DB BEFORE posting (race-condition killer)
 #   6. In-process posted_hashes set for same-execution dedup
 #   7. Fuzzy: overlap coefficient + Jaccard
@@ -57,16 +66,14 @@ RSS_SOURCES: list[tuple[str, str]] = [
     ("https://feeds.bbci.co.uk/persian/rss.xml",            "BBCPersian"),
 ]
 
-# ── Time budget constants (seconds) ──
-GLOBAL_DEADLINE_SEC  = 27   # hard stop (30s limit - 3s margin)
-FEED_FETCH_TIMEOUT   = 5    # per individual feed HTTP
-FEEDS_TOTAL_TIMEOUT  = 10   # all feeds in parallel
-DB_TIMEOUT           = 3    # per Appwrite call
-IMAGE_SCRAPE_TIMEOUT = 3    # image scraping per article
-TELEGRAM_TIMEOUT     = 6    # per Telegram API call
-INTER_POST_DELAY     = 1.5  # between consecutive posts
+GLOBAL_DEADLINE_SEC  = 27
+FEED_FETCH_TIMEOUT   = 5
+FEEDS_TOTAL_TIMEOUT  = 10
+DB_TIMEOUT           = 3
+IMAGE_SCRAPE_TIMEOUT = 3
+TELEGRAM_TIMEOUT     = 6
+INTER_POST_DELAY     = 1.5
 
-# ── Content limits ──
 MAX_IMAGES            = 5
 MAX_DESCRIPTION_CHARS = 500
 CAPTION_MAX           = 1024
@@ -74,14 +81,12 @@ HOURS_THRESHOLD       = 24
 ELECTION_SCORE_PASS   = 2
 FUZZY_THRESHOLD       = 0.60
 
-# ── Image filters ──
 IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.webp')
 IMAGE_BLOCKLIST  = [
     'doubleclick', 'googletagmanager', 'analytics',
     'pixel', 'beacon', 'tracking', 'stat.', 'stats.',
 ]
 
-# ── Election keywords ──
 ELECTION_KEYWORDS_HIGH = [
     "انتخابات", "انتخاباتی", "ریاست‌جمهوری", "ریاست جمهوری",
     "مجلس", "شورا", "شورای شهر", "شورای اسلامی",
@@ -119,7 +124,6 @@ PERSIAN_STOPWORDS = {
     "to", "for", "and", "or", "but", "with", "on",
 }
 
-# ── Hashtag mapping ──
 _HASHTAG_MAP = [
     ("انتخابات",       "#انتخابات"),
     ("ریاست",          "#ریاست_جمهوری"),
@@ -158,7 +162,7 @@ async def main(event=None, context=None):
         return GLOBAL_DEADLINE_SEC - (monotonic() - _t0)
 
     print("[INFO] ══════════════════════════════")
-    print("[INFO] Election Bot v2.1 started")
+    print("[INFO] Election Bot v2.2 started")
     print(f"[INFO] {datetime.now(timezone.utc).isoformat()}")
     print("[INFO] ══════════════════════════════")
 
@@ -205,17 +209,14 @@ async def main(event=None, context=None):
     if not all_entries:
         return {"status": "success", "posted": 0}
 
-    # ── Sort newest first ──
     all_entries.sort(
         key=lambda x: x["pub_date"] or datetime.min.replace(tzinfo=timezone.utc),
         reverse=True,
     )
 
     # ── Phase 2: Load recent DB records ONCE ─────────────
-    # Build in-memory sets: link_set, hash_set, fuzzy_list
-    # This is the ONLY DB read. Zero per-article DB queries.
-    known_links:  set[str]  = set()
-    known_hashes: set[str]  = set()
+    known_links:   set[str]   = set()
+    known_hashes:  set[str]   = set()
     fuzzy_records: list[dict] = []
 
     db_budget = min(DB_TIMEOUT, _remaining() - 12)
@@ -242,20 +243,19 @@ async def main(event=None, context=None):
     else:
         print("[WARN] No time budget for DB load.")
 
-    # ── In-process dedup set ──
     posted_hashes: set[str] = set()
 
     # ── Phase 3: Filter + post ───────────────────────────
     for item in all_entries:
-        # ── Deadline check: need ~12s for one full post cycle ──
         if _remaining() < 12:
-            print(f"[INFO] Time budget exhausted ({_remaining():.1f}s left). Stopping.")
+            print(f"[INFO] Time budget exhausted ({_remaining():.1f}s). Stopping.")
             break
 
         title    = item["title"]
         link     = item["link"]
         desc     = item["desc"]
         source   = item["source"]
+        feed_url = item["feed_url"]
         pub_date = item["pub_date"]
 
         stats["fetched"] += 1
@@ -265,32 +265,32 @@ async def main(event=None, context=None):
             stats["skip_time"] += 1
             continue
 
-        # ── Election filter (instant) ──
+        # ── Election filter ──
         score = _election_score(title, desc)
         if score < ELECTION_SCORE_PASS:
             stats["skip_topic"] += 1
             continue
 
-        # ── Dedup 1: in-process set (same execution) ──
+        # ── Dedup 1: in-process ──
         content_hash = _make_hash(title)
         if content_hash in posted_hashes:
             stats["skip_dupe"] += 1
             print(f"[SKIP:dupe:local] [{source}] {title[:50]}")
             continue
 
-        # ── Dedup 2: known hashes from DB (in-memory) ──
+        # ── Dedup 2: known hashes ──
         if content_hash in known_hashes:
             stats["skip_dupe"] += 1
             print(f"[SKIP:dupe:hash] [{source}] {title[:50]}")
             continue
 
-        # ── Dedup 3: known links from DB (in-memory) ──
+        # ── Dedup 3: known links ──
         if link in known_links:
             stats["skip_dupe"] += 1
             print(f"[SKIP:dupe:link] [{source}] {title[:50]}")
             continue
 
-        # ── Dedup 4: fuzzy title similarity (in-memory) ──
+        # ── Dedup 4: fuzzy ──
         if _is_fuzzy_duplicate(title, fuzzy_records):
             stats["skip_dupe"] += 1
             print(f"[SKIP:dupe:fuzzy] [{source}] {title[:50]}")
@@ -298,31 +298,34 @@ async def main(event=None, context=None):
 
         print(f"[PASS] score={score} [{source}] {title[:50]} ({_remaining():.1f}s left)")
 
-        # ── Save to DB BEFORE posting (atomic race lock) ──
+        # ── Save to DB BEFORE posting ──
         save_budget = min(DB_TIMEOUT, _remaining() - 8)
         if save_budget < 1:
             print("[WARN] No time for DB save. Stopping.")
             break
 
+        pub_iso = pub_date.isoformat() if pub_date else now.isoformat()
+
         try:
             saved = await asyncio.wait_for(
                 loop.run_in_executor(
                     None, db.save,
-                    link, title, content_hash, source, now.isoformat()
+                    link, title, content_hash, source, feed_url,
+                    pub_iso, now.isoformat()
                 ),
                 timeout=save_budget,
             )
         except asyncio.TimeoutError:
-            print("[WARN] DB save timed out — skip to prevent dupe risk.")
+            print("[WARN] DB save timed out — skip to prevent dupe.")
             stats["errors"] += 1
             continue
 
         if not saved:
-            print("[INFO] DB save returned False (409 conflict or error) — skip.")
+            print("[INFO] DB save failed (409/error) — skip post.")
             stats["skip_dupe"] += 1
             continue
 
-        # ── Mark in all local sets immediately ──
+        # ── Mark in all local sets ──
         posted_hashes.add(content_hash)
         known_hashes.add(content_hash)
         known_links.add(link)
@@ -366,7 +369,6 @@ async def main(event=None, context=None):
         if success:
             stats["posted"] += 1
             print(f"[SUCCESS] [{source}] {title[:50]} (#{stats['posted']})")
-
             if _remaining() > 4:
                 await asyncio.sleep(INTER_POST_DELAY)
         else:
@@ -413,7 +415,7 @@ def _fetch_one_feed(url: str, source_name: str) -> list[dict]:
             url,
             timeout=FEED_FETCH_TIMEOUT,
             headers={
-                "User-Agent": "Mozilla/5.0 (compatible; ElectionBot/2.1)",
+                "User-Agent": "Mozilla/5.0 (compatible; ElectionBot/2.2)",
                 "Accept":     "application/rss+xml, application/xml, */*",
             },
         )
@@ -447,6 +449,7 @@ def _fetch_one_feed(url: str, source_name: str) -> list[dict]:
                 "desc":     desc,
                 "pub_date": pub_date,
                 "source":   source_name,
+                "feed_url": url,
                 "entry":    entry,
             })
 
@@ -466,6 +469,19 @@ def _fetch_one_feed(url: str, source_name: str) -> list[dict]:
 # ═══════════════════════════════════════════════════════════
 
 class _AppwriteDB:
+    """
+    All methods are synchronous (blocking) — call via run_in_executor.
+
+    Appwrite schema (collection "history"):
+      link           string  700  required, indexed
+      title          string  300
+      site           string  100
+      published_at   datetime
+      created_at     datetime
+      feed_url       string  500
+      content_hash   string  128  indexed
+    """
+
     def __init__(self, endpoint, project, key, database_id, collection_id):
         self._url = (
             f"{endpoint}/databases/{database_id}"
@@ -478,10 +494,6 @@ class _AppwriteDB:
         }
 
     def load_recent(self, limit: int = 500) -> list[dict]:
-        """
-        Single DB call — returns raw document dicts with
-        link, title, content_hash fields.
-        """
         try:
             resp = requests.get(
                 self._url,
@@ -509,10 +521,14 @@ class _AppwriteDB:
             return []
 
     def save(self, link: str, title: str, content_hash: str,
-             source: str, created_at: str) -> bool:
+             site: str, feed_url: str, published_at: str,
+             created_at: str) -> bool:
         """
-        Uses content_hash[:36] as document ID.
-        Appwrite rejects with 409 if already exists → atomic dedup.
+        Saves document with content_hash[:36] as ID.
+        409 = already exists (another execution won the race).
+
+        Fields match EXACT Appwrite schema:
+          link, title, content_hash, site, feed_url, published_at, created_at
         """
         doc_id = content_hash[:36]
         try:
@@ -522,10 +538,12 @@ class _AppwriteDB:
                 json={
                     "documentId": doc_id,
                     "data": {
-                        "link":         link[:500],
+                        "link":         link[:700],
                         "title":        title[:300],
-                        "content_hash": content_hash,
-                        "source":       source[:100],
+                        "content_hash": content_hash[:128],
+                        "site":         site[:100],
+                        "feed_url":     feed_url[:500],
+                        "published_at": published_at,
                         "created_at":   created_at,
                     },
                 },
@@ -534,12 +552,29 @@ class _AppwriteDB:
             if resp.status_code in (200, 201):
                 return True
             if resp.status_code == 409:
-                print(f"[INFO] DB 409 — already exists (race won by other execution)")
+                print(f"[INFO] DB 409 — already exists")
                 return False
             print(f"[WARN] DB save {resp.status_code}: {resp.text[:200]}")
             return False
         except Exception as e:
             print(f"[WARN] DB save: {e}")
+            return False
+
+    def _exists(self, field: str, value: str) -> bool:
+        try:
+            resp = requests.get(
+                self._url,
+                headers=self._headers,
+                params={
+                    "queries[]": f'equal("{field}", ["{value}"])',
+                    "limit":     1,
+                },
+                timeout=DB_TIMEOUT,
+            )
+            if resp.status_code == 200:
+                return resp.json().get("total", 0) > 0
+            return False
+        except Exception:
             return False
 
 
@@ -622,7 +657,6 @@ def _normalize_text(text: str) -> str:
     text = text.replace("إ", "ا").replace("أ", "ا")
     text = text.replace("ئ", "ی").replace("ى", "ی")
     text = re.sub(r"[\u064B-\u065F\u0670]", "", text)
-    # ZWNJ/ZWJ: REMOVE (not replace with space)
     text = re.sub(r"[\u200c\u200d\u200e\u200f\ufeff]", "", text)
     text = text.lower()
     text = re.sub(r"[^\w\s\u0600-\u06FF]", " ", text)
@@ -712,10 +746,8 @@ def _is_fuzzy_duplicate(title: str, recent_records: list[dict]) -> bool:
 async def _collect_images_async(
     entry, article_url: str, loop: asyncio.AbstractEventLoop,
 ) -> list[str]:
-    # Fast path: RSS entry data (no network)
     images = _extract_rss_images(entry)
 
-    # Slow path: og:image only if needed
     if not images:
         try:
             og = await asyncio.wait_for(
@@ -881,10 +913,6 @@ def _build_caption(title: str, desc: str, hashtags: list[str] = None) -> str:
 async def _post_to_telegram(
     bot: Bot, chat_id: str, image_urls: list[str], caption: str,
 ) -> bool:
-    """
-    Single atomic message: images + caption together.
-    No separate text message. No delay between parts.
-    """
 
     # ── Multiple images → album with caption on first ──
     if len(image_urls) >= 2:
