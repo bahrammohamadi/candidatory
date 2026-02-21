@@ -1,35 +1,25 @@
 # ============================================================
 # Telegram Election News Bot — @candidatoryiran
-# Version:    3.0 — High-Volume + Context-Sensitive Scoring
+# Version:    4.0 — Precision Scoring + Batch + Retry + Resilience
 # Runtime:    Python 3.12 / Appwrite Cloud Functions
 # Timeout:    30 seconds (Appwrite free plan limit)
 #
+# v4.0 CHANGES:
+#   ✓ Word-boundary matching (no more substring false positives)
+#   ✓ Feed retry with exponential backoff (3 attempts)
+#   ✓ Batch Telegram posting (up to 4 items per run)
+#   ✓ DB timeout increased to 5s with local fallback
+#   ✓ context.log() / context.error() for structured logging
+#   ✓ Configurable batch size
+#   ✓ Per-feed error isolation
+#   ✓ Summary output with feed/tier/error breakdown
+#
 # ARCHITECTURE:
-#   Phase 1: Fetch all feeds in parallel (budget: 8s)
-#   Phase 2: Load DB state once — history + buffer (budget: 3s)
-#   Phase 3: Score + extract entities (in-memory, instant)
+#   Phase 1: Fetch feeds in parallel with retry     (budget: 10s)
+#   Phase 2: Load DB state once + local fallback    (budget: 5s)
+#   Phase 3: Score with word-boundary matching      (instant)
 #   Phase 4: Dedup (in-memory, instant)
-#   Phase 5: Triage — HIGH→immediate, MEDIUM→buffer, LOW→discard
-#   Phase 6: Publish from queue (budget: remaining ~14s)
-#
-# SCORING (dual-layer):
-#   Layer 1: Core election keywords (+3 title, +1 desc)
-#   Layer 2: Contextual political patterns (+2 title, +1 desc)
-#   Rejection keywords: instant discard (-100)
-#   Score thresholds:
-#     HIGH   ≥ 5  → publish immediately
-#     MEDIUM ≥ 2  → buffer for 1-2 hours, publish if slot available
-#     LOW    < 2  → discard
-#
-# DEDUP: SHA-256 of sorted normalized title tokens
-#         content_hash[:36] = Appwrite document ID (atomic)
-#         Save BEFORE post (race-condition proof)
-#
-# RATE CONTROL:
-#   Dynamic hourly budget based on score distribution
-#   HIGH items: unlimited (up to Telegram limits)
-#   MEDIUM items: max 5/hour (configurable)
-#   Burst protection: 1.5s inter-post delay
+#   Phase 5: Batch publish by priority              (remaining)
 # ============================================================
 
 import os
@@ -38,9 +28,10 @@ import asyncio
 import hashlib
 import requests
 import feedparser
+import json
 
 from datetime import datetime, timedelta, timezone
-from time import monotonic
+from time import monotonic, sleep
 from bs4 import BeautifulSoup
 from telegram import Bot, InputMediaPhoto, LinkPreviewOptions
 from telegram.error import TelegramError
@@ -65,28 +56,30 @@ RSS_SOURCES: list[tuple[str, str]] = [
     ("https://feeds.bbci.co.uk/persian/rss.xml",       "BBCPersian"),
 ]
 
-# ── Timing budgets (seconds) ──
+# ── Timing ──
 GLOBAL_DEADLINE_SEC  = 27
 FEED_FETCH_TIMEOUT   = 4
-FEEDS_TOTAL_TIMEOUT  = 8
-DB_TIMEOUT           = 3
+FEEDS_TOTAL_TIMEOUT  = 10
+DB_TIMEOUT           = 5
 IMAGE_SCRAPE_TIMEOUT = 3
 TELEGRAM_TIMEOUT     = 5
-INTER_POST_DELAY     = 1.5
+INTER_POST_DELAY     = 1.0
 
-# ── Content limits ──
-MAX_IMAGES            = 5
-MAX_DESCRIPTION_CHARS = 500
-CAPTION_MAX           = 1024
-HOURS_THRESHOLD       = 24
-BUFFER_HOURS          = 2
-FUZZY_THRESHOLD       = 0.55
+# ── Retry ──
+FEED_MAX_RETRIES     = 3
+FEED_RETRY_BASE_SEC  = 0.5
+
+# ── Batch + limits ──
+PUBLISH_BATCH_SIZE   = 4
+MAX_IMAGES           = 5
+MAX_DESC_CHARS       = 500
+CAPTION_MAX          = 1024
+HOURS_THRESHOLD      = 24
+FUZZY_THRESHOLD      = 0.55
 
 # ── Score thresholds ──
-SCORE_HIGH            = 5
-SCORE_MEDIUM          = 2
-MEDIUM_HOURLY_LIMIT   = 5
-HIGH_HOURLY_LIMIT     = 20
+SCORE_HIGH           = 6
+SCORE_MEDIUM         = 3
 
 # ── Image filters ──
 IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.webp')
@@ -95,95 +88,177 @@ IMAGE_BLOCKLIST  = [
     'pixel', 'beacon', 'tracking', 'stat.', 'stats.',
 ]
 
+
 # ═══════════════════════════════════════════════════════════
-# SECTION 2 — KEYWORD SYSTEM (DUAL-LAYER)
+# SECTION 2 — KEYWORD SYSTEM (WORD-BOUNDARY MATCHING)
 # ═══════════════════════════════════════════════════════════
 
-# ── Layer 1: Core election keywords (high weight) ──
-LAYER1_KEYWORDS = [
-    # Persian core
-    "انتخابات", "انتخاباتی", "ریاست‌جمهوری", "ریاست جمهوری",
-    "مجلس شورای اسلامی", "شورای شهر", "شورای اسلامی",
-    "نامزد", "کاندیدا", "کاندیدای", "داوطلب",
-    "ثبت‌نام", "ثبت نام", "ثبتنام",
-    "رد صلاحیت", "تایید صلاحیت", "احراز صلاحیت", "بررسی صلاحیت",
-    "صلاحیت", "هیئت نظارت", "شورای نگهبان",
-    "ستاد انتخابات", "ستاد انتخاباتی",
-    "حوزه انتخابیه", "تبلیغات انتخاباتی",
-    "صندوق رای", "صندوق رأی", "رای‌گیری", "رایگیری",
-    "مشارکت انتخاباتی", "دور دوم انتخابات",
-    "انتخابات ریاست", "انتخابات مجلس", "انتخابات شورا",
-    "لیست انتخاباتی", "ائتلاف انتخاباتی",
-    # English core
-    "election", "elections", "electoral", "candidate",
-    "ballot", "vote", "voting", "presidential",
-    "parliament", "parliamentary", "runoff",
-    "iran election", "iranian election", "majles",
-    "disqualification", "qualification",
+# Layer 1: CORE election — must be whole-word match
+# Each entry: (normalized_keyword, title_score, desc_score)
+# These are pre-normalized at module load for speed.
+
+_RAW_LAYER1 = [
+    ("انتخابات", 4, 2),
+    ("انتخاباتی", 4, 2),
+    ("ریاست جمهوری", 4, 2),
+    ("ریاستجمهوری", 4, 2),
+    ("مجلس شورای اسلامی", 4, 2),
+    ("نامزد انتخابات", 5, 3),
+    ("نامزد انتخاباتی", 5, 3),
+    ("کاندیدا", 4, 2),
+    ("کاندیدای", 4, 2),
+    ("داوطلب انتخابات", 5, 3),
+    ("ثبتنام داوطلب", 5, 3),
+    ("ثبتنام انتخابات", 5, 3),
+    ("رد صلاحیت", 5, 3),
+    ("تایید صلاحیت", 5, 3),
+    ("احراز صلاحیت", 5, 3),
+    ("بررسی صلاحیت", 4, 2),
+    ("شورای نگهبان", 4, 2),
+    ("هیئت نظارت", 4, 2),
+    ("ستاد انتخابات", 4, 2),
+    ("ستاد انتخاباتی", 4, 2),
+    ("حوزه انتخابیه", 4, 2),
+    ("تبلیغات انتخاباتی", 4, 2),
+    ("صندوق رای", 4, 2),
+    ("رایگیری", 4, 2),
+    ("رای گیری", 4, 2),
+    ("مشارکت انتخاباتی", 4, 2),
+    ("دور دوم انتخابات", 5, 3),
+    ("لیست انتخاباتی", 4, 2),
+    ("ائتلاف انتخاباتی", 4, 2),
+    ("شورای شهر", 3, 1),
+    ("شورای اسلامی", 3, 1),
+    ("شوراهای اسلامی", 3, 1),
+    ("election", 4, 2),
+    ("elections", 4, 2),
+    ("electoral", 4, 2),
+    ("candidate", 4, 2),
+    ("ballot", 4, 2),
+    ("voting", 4, 2),
+    ("presidential", 4, 2),
+    ("parliamentary", 4, 2),
+    ("runoff", 4, 2),
+    ("disqualification", 5, 3),
 ]
 
-# ── Layer 2: Contextual political keywords (medium weight) ──
-LAYER2_KEYWORDS = [
-    # Political context
-    "رای", "رای دادن", "انتخاب", "منتخب",
-    "نماینده", "نمایندگان", "وکیل مجلس",
-    "اصلاح‌طلب", "اصلاحطلب", "اصولگرا", "اصولگرایان",
-    "ائتلاف", "جبهه", "حزب", "فراکسیون",
-    "ستاد", "مناظره", "تبلیغات",
-    "مجلس", "شورا", "پارلمان",
-    # Candidate behavior patterns
-    "وعده", "وعده‌های", "وعده انتخاباتی",
-    "برنامه", "برنامه‌های", "طرح",
-    "بیانیه", "اعلامیه", "سخنرانی",
-    "اگر انتخاب شوم", "در صورت انتخاب",
-    "دولت آینده", "مجلس آینده", "شورای آینده",
-    # Government/policy context
-    "وزارت", "وزیر", "سیاست", "سیاسی",
-    "دولت", "رئیس‌جمهور", "رئیس جمهور",
-    "قانون", "لایحه", "مصوبه",
-    "آموزش", "آموزش و پرورش", "بهداشت", "درمان",
-    "ورزش", "جوانان", "فرهنگ",
-    "اقتصاد", "اشتغال", "تورم", "گرانی",
-    "مسکن", "حمل و نقل", "شهرداری",
-    # English contextual
-    "debate", "polling", "poll", "voter",
-    "campaign", "promise", "policy", "ministry",
-    "reform", "conservative", "coalition",
-    "statement", "speech", "manifesto",
+_RAW_LAYER2 = [
+    ("نماینده مجلس", 2, 1),
+    ("نمایندگان مجلس", 2, 1),
+    ("فراکسیون", 2, 1),
+    ("مناظره", 3, 1),
+    ("مناظره انتخاباتی", 4, 2),
+    ("وعده انتخاباتی", 4, 2),
+    ("برنامه انتخاباتی", 4, 2),
+    ("اگر انتخاب شوم", 5, 3),
+    ("در صورت انتخاب", 5, 3),
+    ("بیانیه انتخاباتی", 4, 2),
+    ("اصلاحطلب", 2, 1),
+    ("اصلاحطلبان", 2, 1),
+    ("اصولگرا", 2, 1),
+    ("اصولگرایان", 2, 1),
+    ("حزب", 1, 0),
+    ("جبهه", 1, 0),
+    ("دولت آینده", 2, 1),
+    ("مجلس آینده", 2, 1),
+    ("رئیس جمهور", 2, 1),
+    ("رئیسجمهور", 2, 1),
+    ("نظرسنجی", 3, 2),
+    ("نظرسنجی انتخاباتی", 4, 2),
+    ("debate", 3, 1),
+    ("polling", 3, 2),
+    ("campaign", 2, 1),
+    ("manifesto", 3, 2),
 ]
 
-# ── Rejection keywords (instant discard) ──
-REJECTION_KEYWORDS = [
-    "فیلم سینمایی", "سریال", "بازیگر", "سینما",
-    "فوتبال", "والیبال", "لیگ برتر", "جام جهانی",
-    "بورس", "ارز دیجیتال", "بیت کوین", "رمزارز",
-    "زلزله", "سیل", "آتش سوزی", "تصادف",
-    "آشپزی", "رسپی", "مد و فشن",
-    "فال روز", "طالع بینی", "هواشناسی",
+# ── Rejection: if ANY of these appear → score = -100 ──
+_RAW_REJECTION = [
+    "فیلم سینمایی", "سریال تلویزیونی", "بازیگر سینما",
+    "لیگ برتر فوتبال", "جام جهانی فوتبال", "والیبال",
+    "بیت کوین", "ارز دیجیتال", "رمزارز",
+    "زلزله", "آتش سوزی", "تصادف رانندگی",
+    "آشپزی", "رسپی غذا", "فال روز", "طالع بینی",
+    "هواشناسی فردا",
 ]
 
-# ── Candidate names (entity extraction + scoring boost) ──
+# ── Candidate names ──
 KNOWN_CANDIDATES = [
     "پزشکیان", "جلیلی", "قالیباف", "زاکانی",
-    "لاریجانی", "رئیسی", "روحانی", "احمدی‌نژاد",
-    "همتی", "مهرعلیزاده", "رضایی", "هاشمی",
-    "عارف", "جهانگیری", "واعظی", "ظریف",
-    "میرسلیم", "پورمحمدی", "آملی لاریجانی",
+    "لاریجانی", "روحانی", "احمدینژاد",
+    "رضایی", "همتی", "مهرعلیزاده",
+    "جهانگیری", "واعظی", "ظریف",
+    "میرسلیم", "پورمحمدی",
 ]
 
-# ── Topic categories for tagging ──
+# ── Topic patterns (for hashtag extraction only, NOT scoring) ──
 TOPIC_PATTERNS: dict[str, list[str]] = {
-    "صلاحیت":    ["صلاحیت", "رد صلاحیت", "تایید صلاحیت", "احراز صلاحیت",
-                   "بررسی صلاحیت", "شورای نگهبان", "هیئت نظارت"],
-    "ثبت‌نام":   ["ثبت‌نام", "ثبت نام", "ثبتنام", "داوطلب", "نامزد"],
-    "تبلیغات":   ["تبلیغات", "ستاد", "مناظره", "سخنرانی", "بیانیه"],
-    "رای‌گیری":  ["رای", "رایگیری", "رای‌گیری", "صندوق", "مشارکت"],
-    "نتایج":     ["نتایج", "شمارش", "پیروز", "منتخب", "آرا"],
-    "مجلس":      ["مجلس", "نماینده", "نمایندگان", "فراکسیون", "پارلمان"],
-    "شورا":      ["شورای شهر", "شورای اسلامی", "شورا", "شهرداری"],
-    "اقتصاد":    ["اقتصاد", "اشتغال", "تورم", "گرانی", "مسکن", "بودجه"],
-    "سیاست_خارجی": ["سیاست خارجی", "دیپلماسی", "برجام", "تحریم", "مذاکره"],
+    "صلاحیت":    ["رد صلاحیت", "تایید صلاحیت", "احراز صلاحیت",
+                   "بررسی صلاحیت", "شورای نگهبان"],
+    "ثبت‌نام":   ["ثبتنام", "داوطلب", "نامزد انتخابات"],
+    "تبلیغات":   ["تبلیغات انتخاباتی", "ستاد انتخاباتی", "مناظره"],
+    "رای‌گیری":  ["رایگیری", "رای گیری", "صندوق رای", "مشارکت انتخاباتی"],
+    "نتایج":     ["نتایج انتخابات", "شمارش آرا", "پیروز انتخابات"],
+    "مجلس":      ["مجلس شورای اسلامی", "نماینده مجلس", "نمایندگان مجلس",
+                   "فراکسیون"],
+    "شورا":      ["شورای شهر", "شورای اسلامی", "شوراهای اسلامی"],
 }
+
+# ── Pre-normalize all keywords at import time ──
+def _pre_normalize(raw_text: str) -> str:
+    """Normalize for matching — same as _normalize_text but no stopword removal."""
+    t = raw_text
+    t = t.replace("ي", "ی").replace("ك", "ک")
+    t = t.replace("ة", "ه").replace("ؤ", "و")
+    t = t.replace("إ", "ا").replace("أ", "ا")
+    t = t.replace("ئ", "ی").replace("ى", "ی")
+    t = re.sub(r"[\u064B-\u065F\u0670]", "", t)
+    t = re.sub(r"[\u200c\u200d\u200e\u200f\ufeff]", "", t)
+    t = t.lower()
+    t = re.sub(r"[^\w\s\u0600-\u06FF]", " ", t)
+    return " ".join(t.split())
+
+LAYER1_COMPILED: list[tuple[re.Pattern, int, int]] = []
+for kw, ts, ds in _RAW_LAYER1:
+    nkw = _pre_normalize(kw)
+    if nkw:
+        pattern = re.compile(r'(?:^|\s)' + re.escape(nkw) + r'(?:\s|$)')
+        LAYER1_COMPILED.append((pattern, ts, ds))
+
+LAYER2_COMPILED: list[tuple[re.Pattern, int, int]] = []
+for kw, ts, ds in _RAW_LAYER2:
+    nkw = _pre_normalize(kw)
+    if nkw:
+        pattern = re.compile(r'(?:^|\s)' + re.escape(nkw) + r'(?:\s|$)')
+        LAYER2_COMPILED.append((pattern, ts, ds))
+
+REJECTION_COMPILED: list[re.Pattern] = []
+for kw in _RAW_REJECTION:
+    nkw = _pre_normalize(kw)
+    if nkw:
+        REJECTION_COMPILED.append(
+            re.compile(r'(?:^|\s)' + re.escape(nkw) + r'(?:\s|$)')
+        )
+
+CANDIDATE_PATTERNS: list[tuple[re.Pattern, str]] = []
+for name in KNOWN_CANDIDATES:
+    nn = _pre_normalize(name)
+    if nn:
+        CANDIDATE_PATTERNS.append((
+            re.compile(r'(?:^|\s)' + re.escape(nn) + r'(?:\s|$)'),
+            name,
+        ))
+
+TOPIC_COMPILED: dict[str, list[re.Pattern]] = {}
+for topic, patterns in TOPIC_PATTERNS.items():
+    compiled = []
+    for pat in patterns:
+        np = _pre_normalize(pat)
+        if np:
+            compiled.append(
+                re.compile(r'(?:^|\s)' + re.escape(np) + r'(?:\s|$)')
+            )
+    if compiled:
+        TOPIC_COMPILED[topic] = compiled
 
 PERSIAN_STOPWORDS = {
     "و", "در", "به", "از", "که", "این", "را", "با", "های",
@@ -194,11 +269,9 @@ PERSIAN_STOPWORDS = {
     "to", "for", "and", "or", "but", "with", "on",
 }
 
-# ── Hashtag mapping ──
 _HASHTAG_MAP = [
     ("انتخابات",       "#انتخابات"),
     ("ریاست",          "#ریاست_جمهوری"),
-    ("ریاستجمهوری",    "#ریاست_جمهوری"),
     ("مجلس",           "#مجلس"),
     ("شورا",           "#شورای_شهر"),
     ("کاندیدا",        "#کاندیدا"),
@@ -206,38 +279,79 @@ _HASHTAG_MAP = [
     ("ثبتنام",         "#ثبت_نام"),
     ("صلاحیت",         "#صلاحیت"),
     ("شورای نگهبان",   "#شورای_نگهبان"),
-    ("رای",            "#رأی"),
     ("مناظره",         "#مناظره"),
-    ("تبلیغات",        "#تبلیغات_انتخاباتی"),
     ("مشارکت",         "#مشارکت"),
-    ("صندوق",          "#صندوق_رأی"),
-    ("نماینده",        "#نمایندگان"),
+    ("نمایندگان",      "#نمایندگان"),
     ("اصلاحطلب",       "#اصلاح_طلبان"),
     ("اصولگرا",        "#اصولگرایان"),
-    ("اقتصاد",         "#اقتصاد"),
-    ("دیپلماسی",       "#سیاست_خارجی"),
     ("election",       "#Election"),
     ("candidate",      "#Candidate"),
     ("parliament",     "#Parliament"),
-    ("vote",           "#Vote"),
     ("presidential",   "#Presidential"),
 ]
 
 
 # ═══════════════════════════════════════════════════════════
-# SECTION 3 — MAIN ENTRY POINT
+# SECTION 3 — LOGGER (context-aware)
+# ═══════════════════════════════════════════════════════════
+
+class _Logger:
+    """Uses context.log/error when available, falls back to print."""
+
+    def __init__(self, context=None):
+        self._ctx = context
+
+    def info(self, msg: str):
+        if self._ctx and hasattr(self._ctx, 'log'):
+            self._ctx.log(f"[INFO] {msg}")
+        else:
+            print(f"[INFO] {msg}")
+
+    def warn(self, msg: str):
+        if self._ctx and hasattr(self._ctx, 'log'):
+            self._ctx.log(f"[WARN] {msg}")
+        else:
+            print(f"[WARN] {msg}")
+
+    def error(self, msg: str):
+        if self._ctx and hasattr(self._ctx, 'error'):
+            self._ctx.error(f"[ERROR] {msg}")
+        else:
+            print(f"[ERROR] {msg}")
+
+    def item(self, action: str, source: str, title: str,
+             score: int, tier: str,
+             candidates: list[str] = None,
+             topics: list[str] = None):
+        parts = [f"[{action}]", f"s={score}", f"t={tier}",
+                 f"[{source}]", title[:55]]
+        if candidates:
+            parts.append(f"c={','.join(candidates[:2])}")
+        if topics:
+            parts.append(f"tp={','.join(topics[:2])}")
+        self.info(" ".join(parts))
+
+
+# Global logger — set in main()
+log = _Logger()
+
+
+# ═══════════════════════════════════════════════════════════
+# SECTION 4 — MAIN ENTRY POINT
 # ═══════════════════════════════════════════════════════════
 
 async def main(event=None, context=None):
+    global log
+    log = _Logger(context)
     _t0 = monotonic()
 
     def _remaining() -> float:
         return GLOBAL_DEADLINE_SEC - (monotonic() - _t0)
 
-    _log("══════════════════════════════")
-    _log("Election Bot v3.0 started")
-    _log(f"{datetime.now(timezone.utc).isoformat()}")
-    _log("══════════════════════════════")
+    log.info("══════════════════════════════")
+    log.info("Election Bot v4.0 started")
+    log.info(f"{datetime.now(timezone.utc).isoformat()}")
+    log.info("══════════════════════════════")
 
     config = _load_config()
     if not config:
@@ -254,60 +368,64 @@ async def main(event=None, context=None):
 
     now            = datetime.now(timezone.utc)
     time_threshold = now - timedelta(hours=HOURS_THRESHOLD)
-    buffer_cutoff  = now - timedelta(hours=BUFFER_HOURS)
     loop           = asyncio.get_event_loop()
 
     stats = {
-        "fetched": 0, "skip_time": 0, "skip_topic": 0,
-        "skip_dupe": 0, "posted_high": 0, "posted_medium": 0,
-        "buffered": 0, "errors": 0,
+        "feeds_ok": 0, "feeds_fail": 0, "feeds_retry": 0,
+        "entries_total": 0, "skip_time": 0, "skip_topic": 0,
+        "skip_dupe": 0,
+        "queued_high": 0, "queued_medium": 0, "queued_low": 0,
+        "posted": 0, "errors": 0,
+        "db_timeout": False,
     }
 
-    # ══════════════════════════════════════════════════════
-    # Phase 1: Fetch ALL feeds in parallel
-    # ══════════════════════════════════════════════════════
-    budget = min(FEEDS_TOTAL_TIMEOUT, _remaining() - 18)
+    # ════════════════════════════════════════════════════
+    # Phase 1: Fetch ALL feeds in parallel WITH retry
+    # ════════════════════════════════════════════════════
+    budget = min(FEEDS_TOTAL_TIMEOUT, _remaining() - 16)
     if budget < 3:
-        _log("Not enough time for feed fetch.")
-        return {"status": "success", "posted": 0}
+        log.warn("Not enough time for feed fetch.")
+        return _build_response(stats)
 
-    _log(f"Fetching {len(RSS_SOURCES)} feeds (budget={budget:.1f}s)...")
+    log.info(f"Fetching {len(RSS_SOURCES)} feeds (budget={budget:.1f}s)...")
+    feed_results: list[dict] = []
     try:
-        all_entries: list[dict] = await asyncio.wait_for(
-            _fetch_all_feeds_parallel(loop),
+        feed_results = await asyncio.wait_for(
+            _fetch_all_feeds_with_retry(loop, stats),
             timeout=budget,
         )
     except asyncio.TimeoutError:
-        _log("Feed fetch timed out — using partial results.", level="WARN")
-        all_entries = []
+        log.warn(f"Feed fetch timed out after {budget:.1f}s — using partial")
 
-    _log(f"Entries collected: {len(all_entries)} ({_remaining():.1f}s left)")
+    stats["entries_total"] = len(feed_results)
+    log.info(f"Collected: {len(feed_results)} entries from "
+             f"{stats['feeds_ok']}/{len(RSS_SOURCES)} feeds "
+             f"({stats['feeds_fail']} failed, {stats['feeds_retry']} retries) "
+             f"({_remaining():.1f}s left)")
 
-    if not all_entries:
-        return {"status": "success", "posted": 0}
+    if not feed_results:
+        return _build_response(stats)
 
-    all_entries.sort(
+    feed_results.sort(
         key=lambda x: x["pub_date"] or datetime.min.replace(tzinfo=timezone.utc),
         reverse=True,
     )
 
-    # ══════════════════════════════════════════════════════
-    # Phase 2: Load DB state ONCE (history + buffer)
-    # ══════════════════════════════════════════════════════
+    # ════════════════════════════════════════════════════
+    # Phase 2: Load DB state ONCE (with fallback)
+    # ════════════════════════════════════════════════════
     known_links:   set[str]   = set()
     known_hashes:  set[str]   = set()
     fuzzy_records: list[dict] = []
-    buffered_items: list[dict] = []
-    hourly_post_count: dict[str, int] = {"high": 0, "medium": 0}
 
-    db_budget = min(DB_TIMEOUT, _remaining() - 15)
-    if db_budget > 1:
+    db_budget = min(DB_TIMEOUT, _remaining() - 12)
+    if db_budget > 2:
         try:
-            raw_records = await asyncio.wait_for(
+            raw = await asyncio.wait_for(
                 loop.run_in_executor(None, db.load_recent, 500),
                 timeout=db_budget,
             )
-            for rec in raw_records:
+            for rec in raw:
                 if rec.get("link"):
                     known_links.add(rec["link"])
                 if rec.get("content_hash"):
@@ -316,98 +434,71 @@ async def main(event=None, context=None):
                     "title":      rec.get("title", ""),
                     "title_norm": _normalize_text(rec.get("title", "")),
                 })
-
-                # Count recent posts for rate limiting
-                created = rec.get("created_at", "")
-                if created:
-                    try:
-                        ct = datetime.fromisoformat(created.replace("Z", "+00:00"))
-                        if ct > now - timedelta(hours=1):
-                            tier = rec.get("score_tier", "high")
-                            if tier in hourly_post_count:
-                                hourly_post_count[tier] += 1
-                    except (ValueError, TypeError):
-                        pass
-
-            _log(f"Loaded {len(raw_records)} DB records → "
-                 f"{len(known_links)} links, {len(known_hashes)} hashes, "
-                 f"hourly: H={hourly_post_count['high']} M={hourly_post_count['medium']} "
-                 f"({_remaining():.1f}s left)")
+            log.info(f"DB loaded: {len(raw)} records → "
+                     f"{len(known_links)} links, {len(known_hashes)} hashes "
+                     f"({_remaining():.1f}s left)")
         except asyncio.TimeoutError:
-            _log("DB load timed out — dedup limited.", level="WARN")
-
-        # Load buffer
-        try:
-            buf_budget = min(DB_TIMEOUT, _remaining() - 13)
-            if buf_budget > 1:
-                buffered_items = await asyncio.wait_for(
-                    loop.run_in_executor(None, db.load_buffer),
-                    timeout=buf_budget,
-                )
-                _log(f"Buffer: {len(buffered_items)} items waiting")
-        except asyncio.TimeoutError:
-            _log("Buffer load timed out.", level="WARN")
+            stats["db_timeout"] = True
+            log.warn("DB load timed out — using local-only dedup")
+        except Exception as e:
+            stats["db_timeout"] = True
+            log.error(f"DB load failed: {e}")
     else:
-        _log("No time budget for DB load.", level="WARN")
+        log.warn("Insufficient budget for DB load")
 
     posted_hashes: set[str] = set()
 
-    # ══════════════════════════════════════════════════════
-    # Phase 3+4: Score, Extract, Dedup, Triage
-    # ══════════════════════════════════════════════════════
-    publish_queue: list[dict] = []   # HIGH items → immediate
-    buffer_queue:  list[dict] = []   # MEDIUM items → buffer
+    # ════════════════════════════════════════════════════
+    # Phase 3+4: Score + Dedup + Triage
+    # ════════════════════════════════════════════════════
+    publish_queue: list[dict] = []
 
-    for item in all_entries:
+    for item in feed_results:
         title    = item["title"]
         link     = item["link"]
         desc     = item["desc"]
         source   = item["source"]
-        feed_url = item["feed_url"]
         pub_date = item["pub_date"]
-
-        stats["fetched"] += 1
 
         # ── Time filter ──
         if pub_date and pub_date < time_threshold:
             stats["skip_time"] += 1
             continue
 
-        # ── Dual-layer scoring ──
-        score_result = _score_article(title, desc)
-        score      = score_result["score"]
-        tier       = score_result["tier"]
-        candidates = score_result["candidates"]
-        topics     = score_result["topics"]
+        # ── Dual-layer scoring (word-boundary) ──
+        result = _score_article(title, desc)
+        score      = result["score"]
+        tier       = result["tier"]
+        candidates = result["candidates"]
+        topics     = result["topics"]
 
         if tier == "LOW":
             stats["skip_topic"] += 1
+            stats["queued_low"] += 1
             continue
 
         # ── Dedup (all in-memory) ──
         content_hash = _make_hash(title)
 
-        if content_hash in posted_hashes:
+        if content_hash in posted_hashes or content_hash in known_hashes:
             stats["skip_dupe"] += 1
-            _log_item("SKIP:dupe:local", source, title, score, tier)
-            continue
-
-        if content_hash in known_hashes:
-            stats["skip_dupe"] += 1
-            _log_item("SKIP:dupe:hash", source, title, score, tier)
             continue
 
         if link in known_links:
             stats["skip_dupe"] += 1
-            _log_item("SKIP:dupe:link", source, title, score, tier)
             continue
 
         if _is_fuzzy_duplicate(title, fuzzy_records):
             stats["skip_dupe"] += 1
-            _log_item("SKIP:dupe:fuzzy", source, title, score, tier)
             continue
 
-        # ── Build enriched item ──
+        # ── Mark seen immediately (prevent same-run dupes) ──
+        posted_hashes.add(content_hash)
+        fuzzy_records.append({
+            "title":      title,
+            "title_norm": _normalize_text(title),
+        })
+
         enriched = {
             **item,
             "content_hash": content_hash,
@@ -417,168 +508,294 @@ async def main(event=None, context=None):
             "topics":       topics,
         }
 
-        # ── Triage ──
         if tier == "HIGH":
-            publish_queue.append(enriched)
-            _log_item("QUEUE:HIGH", source, title, score, tier,
-                      candidates=candidates, topics=topics)
-        elif tier == "MEDIUM":
-            buffer_queue.append(enriched)
-            _log_item("QUEUE:MEDIUM", source, title, score, tier,
-                      candidates=candidates, topics=topics)
+            stats["queued_high"] += 1
+        else:
+            stats["queued_medium"] += 1
 
-    _log(f"Triage complete: {len(publish_queue)} HIGH, "
-         f"{len(buffer_queue)} MEDIUM to buffer")
+        publish_queue.append(enriched)
+        log.item("QUEUED", source, title, score, tier,
+                 candidates=candidates, topics=topics)
 
-    # ── Add mature buffer items to publish queue ──
-    mature_buffer = [
-        b for b in buffered_items
-        if b.get("buffered_at", "") and _is_buffer_mature(b["buffered_at"], buffer_cutoff)
-    ]
-    if mature_buffer:
-        _log(f"Buffer: {len(mature_buffer)} mature items ready to publish")
+    # ── Sort by score descending ──
+    publish_queue.sort(key=lambda x: x["score"], reverse=True)
 
-    # ══════════════════════════════════════════════════════
-    # Phase 5: Publish
-    # ══════════════════════════════════════════════════════
+    log.info(f"Queue: {len(publish_queue)} items "
+             f"(H={stats['queued_high']} M={stats['queued_medium']}) "
+             f"({_remaining():.1f}s left)")
 
-    # ── Publish HIGH items first (no hourly limit) ──
+    # ════════════════════════════════════════════════════
+    # Phase 5: Batch publish (priority order)
+    # ════════════════════════════════════════════════════
+    batch_count = 0
+
     for item in publish_queue:
-        if _remaining() < 10:
-            _log(f"Time budget low ({_remaining():.1f}s). Stopping HIGH publish.")
+        if batch_count >= PUBLISH_BATCH_SIZE:
+            log.info(f"Batch limit ({PUBLISH_BATCH_SIZE}) reached.")
             break
 
-        if hourly_post_count["high"] >= HIGH_HOURLY_LIMIT:
-            _log("HIGH hourly limit reached. Remaining HIGH items buffered.")
-            buffer_queue.append(item)
-            continue
+        if _remaining() < 8:
+            log.info(f"Time budget low ({_remaining():.1f}s). Stopping publish.")
+            break
 
         success = await _publish_item(
-            item, bot, config["chat_id"], db, loop,
-            now, _remaining,
+            item, bot, config["chat_id"], db, loop, now, _remaining,
         )
+
         if success:
-            stats["posted_high"] += 1
-            hourly_post_count["high"] += 1
-            posted_hashes.add(item["content_hash"])
+            stats["posted"] += 1
+            batch_count += 1
             known_hashes.add(item["content_hash"])
             known_links.add(item["link"])
-            fuzzy_records.append({
-                "title":      item["title"],
-                "title_norm": _normalize_text(item["title"]),
-            })
-            if _remaining() > 4:
+
+            if _remaining() > 4 and batch_count < PUBLISH_BATCH_SIZE:
                 await asyncio.sleep(INTER_POST_DELAY)
         else:
             stats["errors"] += 1
-
-    # ── Publish mature MEDIUM items (within hourly limit) ──
-    medium_candidates = mature_buffer + [
-        b for b in buffer_queue
-        if b.get("score", 0) >= SCORE_HIGH - 1
-    ]
-    medium_candidates.sort(key=lambda x: x.get("score", 0), reverse=True)
-
-    for item in medium_candidates:
-        if _remaining() < 10:
-            _log(f"Time budget low ({_remaining():.1f}s). Stopping MEDIUM publish.")
-            break
-
-        if hourly_post_count["medium"] >= MEDIUM_HOURLY_LIMIT:
-            _log("MEDIUM hourly limit reached.")
-            break
-
-        if item.get("content_hash", "") in posted_hashes:
-            continue
-        if item.get("content_hash", "") in known_hashes:
-            continue
-
-        success = await _publish_item(
-            item, bot, config["chat_id"], db, loop,
-            now, _remaining,
-        )
-        if success:
-            stats["posted_medium"] += 1
-            hourly_post_count["medium"] += 1
-            posted_hashes.add(item["content_hash"])
-            known_hashes.add(item["content_hash"])
-            known_links.add(item.get("link", ""))
-            fuzzy_records.append({
-                "title":      item.get("title", ""),
-                "title_norm": _normalize_text(item.get("title", "")),
-            })
-            if _remaining() > 4:
-                await asyncio.sleep(INTER_POST_DELAY)
-        else:
-            stats["errors"] += 1
-
-    # ── Save remaining MEDIUM items to buffer ──
-    remaining_buffer = [
-        b for b in buffer_queue
-        if b.get("content_hash", "") not in posted_hashes
-        and b.get("content_hash", "") not in known_hashes
-    ]
-    for item in remaining_buffer[:10]:
-        if _remaining() < 4:
-            break
-        try:
-            await asyncio.wait_for(
-                loop.run_in_executor(
-                    None, db.save_buffer,
-                    item.get("link", ""),
-                    item.get("title", ""),
-                    item.get("content_hash", ""),
-                    item.get("source", ""),
-                    item.get("feed_url", ""),
-                    item.get("desc", ""),
-                    item.get("score", 0),
-                    item.get("tier", "MEDIUM"),
-                    ",".join(item.get("candidates", [])),
-                    ",".join(item.get("topics", [])),
-                    now.isoformat(),
-                ),
-                timeout=2,
-            )
-            stats["buffered"] += 1
-        except (asyncio.TimeoutError, Exception) as e:
-            _log(f"Buffer save failed: {e}", level="WARN")
 
     # ── Summary ──
     elapsed = monotonic() - _t0
-    total_posted = stats["posted_high"] + stats["posted_medium"]
-    print(f"\n[INFO] ─────── SUMMARY ({elapsed:.1f}s) ───────")
-    print(f"[INFO] Fetched      : {stats['fetched']}")
-    print(f"[INFO] Skip/time    : {stats['skip_time']}")
-    print(f"[INFO] Skip/topic   : {stats['skip_topic']}")
-    print(f"[INFO] Skip/dupe    : {stats['skip_dupe']}")
-    print(f"[INFO] Posted HIGH  : {stats['posted_high']}")
-    print(f"[INFO] Posted MEDIUM: {stats['posted_medium']}")
-    print(f"[INFO] Buffered     : {stats['buffered']}")
-    print(f"[INFO] Errors       : {stats['errors']}")
-    print(f"[INFO] Rate H={hourly_post_count['high']}/{HIGH_HOURLY_LIMIT} "
-          f"M={hourly_post_count['medium']}/{MEDIUM_HOURLY_LIMIT}")
-    print("[INFO] ──────────────────────────────")
+    log.info("─────── SUMMARY ───────")
+    log.info(f"Time: {elapsed:.1f}s / {GLOBAL_DEADLINE_SEC}s")
+    log.info(f"Feeds: {stats['feeds_ok']} ok, {stats['feeds_fail']} failed, "
+             f"{stats['feeds_retry']} retries")
+    log.info(f"Entries: {stats['entries_total']} total")
+    log.info(f"Skipped: {stats['skip_time']} time, {stats['skip_topic']} topic, "
+             f"{stats['skip_dupe']} dupe")
+    log.info(f"Queued: H={stats['queued_high']} M={stats['queued_medium']} "
+             f"L={stats['queued_low']}")
+    log.info(f"Posted: {stats['posted']} | Errors: {stats['errors']}")
+    if stats["db_timeout"]:
+        log.warn("DB timeout occurred — some dedup may be incomplete")
+    log.info("───────────────────────")
 
-    return {"status": "success", "posted": total_posted}
+    return _build_response(stats)
+
+
+def _build_response(stats: dict) -> dict:
+    return {
+        "status":         "success",
+        "posted":         stats.get("posted", 0),
+        "feeds_ok":       stats.get("feeds_ok", 0),
+        "feeds_failed":   stats.get("feeds_fail", 0),
+        "entries_total":  stats.get("entries_total", 0),
+        "queued_high":    stats.get("queued_high", 0),
+        "queued_medium":  stats.get("queued_medium", 0),
+        "queued_low":     stats.get("queued_low", 0),
+        "skipped_dupe":   stats.get("skip_dupe", 0),
+        "skipped_topic":  stats.get("skip_topic", 0),
+        "errors":         stats.get("errors", 0),
+        "db_timeout":     stats.get("db_timeout", False),
+    }
 
 
 # ═══════════════════════════════════════════════════════════
-# SECTION 4 — PUBLISH SINGLE ITEM
+# SECTION 5 — FEED FETCHER WITH RETRY
+# ═══════════════════════════════════════════════════════════
+
+async def _fetch_all_feeds_with_retry(
+    loop: asyncio.AbstractEventLoop,
+    stats: dict,
+) -> list[dict]:
+    """Fetch all feeds in parallel. Each feed retries up to 3 times."""
+    tasks = [
+        loop.run_in_executor(None, _fetch_one_feed_with_retry, url, name, stats)
+        for url, name in RSS_SOURCES
+    ]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    all_entries: list[dict] = []
+    for i, result in enumerate(results):
+        if isinstance(result, Exception):
+            log.error(f"{RSS_SOURCES[i][1]}: Unhandled: {result}")
+            stats["feeds_fail"] += 1
+            continue
+        if result is None:
+            stats["feeds_fail"] += 1
+            continue
+        if result:
+            all_entries.extend(result)
+            stats["feeds_ok"] += 1
+        else:
+            stats["feeds_fail"] += 1
+
+    return all_entries
+
+
+def _fetch_one_feed_with_retry(
+    url: str, source_name: str, stats: dict,
+) -> list[dict] | None:
+    """Blocking. Retries up to FEED_MAX_RETRIES with exponential backoff."""
+    last_error = None
+
+    for attempt in range(FEED_MAX_RETRIES):
+        try:
+            resp = requests.get(
+                url,
+                timeout=FEED_FETCH_TIMEOUT,
+                headers={
+                    "User-Agent": "Mozilla/5.0 (compatible; ElectionBot/4.0)",
+                    "Accept":     "application/rss+xml, application/xml, */*",
+                },
+            )
+
+            if resp.status_code == 404:
+                log.warn(f"{source_name}: HTTP 404 (not found)")
+                return []
+
+            if resp.status_code != 200:
+                last_error = f"HTTP {resp.status_code}"
+                if attempt < FEED_MAX_RETRIES - 1:
+                    stats["feeds_retry"] += 1
+                    sleep(FEED_RETRY_BASE_SEC * (2 ** attempt))
+                    continue
+                log.warn(f"{source_name}: {last_error} after {attempt+1} attempts")
+                return []
+
+            feed = feedparser.parse(resp.content)
+            if feed.bozo and not feed.entries:
+                log.warn(f"{source_name}: Malformed feed")
+                return []
+
+            entries = []
+            for entry in feed.entries:
+                title = _clean(entry.get("title", ""))
+                link  = _clean(entry.get("link",  ""))
+                if not title or not link:
+                    continue
+
+                raw_html = (
+                    entry.get("summary")
+                    or entry.get("description")
+                    or ""
+                )
+                desc     = _truncate(_strip_html(raw_html), MAX_DESC_CHARS)
+                pub_date = _parse_date(entry)
+
+                entries.append({
+                    "title":    title,
+                    "link":     link,
+                    "desc":     desc,
+                    "pub_date": pub_date,
+                    "source":   source_name,
+                    "feed_url": url,
+                    "entry":    entry,
+                })
+
+            log.info(f"[FEED] {source_name}: {len(entries)} entries"
+                     + (f" (attempt {attempt+1})" if attempt > 0 else ""))
+            return entries
+
+        except requests.exceptions.ConnectionError as e:
+            last_error = str(e)[:100]
+            if attempt < FEED_MAX_RETRIES - 1:
+                stats["feeds_retry"] += 1
+                sleep(FEED_RETRY_BASE_SEC * (2 ** attempt))
+                continue
+
+        except requests.exceptions.Timeout:
+            last_error = "timeout"
+            if attempt < FEED_MAX_RETRIES - 1:
+                stats["feeds_retry"] += 1
+                sleep(FEED_RETRY_BASE_SEC * (2 ** attempt))
+                continue
+
+        except Exception as e:
+            last_error = str(e)[:100]
+            break
+
+    log.error(f"{source_name}: Failed after {FEED_MAX_RETRIES} attempts: {last_error}")
+    return None
+
+
+# ═══════════════════════════════════════════════════════════
+# SECTION 6 — SCORING ENGINE (WORD-BOUNDARY)
+# ═══════════════════════════════════════════════════════════
+
+def _score_article(title: str, desc: str) -> dict:
+    """
+    Dual-layer scoring with word-boundary regex matching.
+    No substring false positives.
+    """
+    norm_title = _pre_normalize(title)
+    norm_desc  = _pre_normalize(desc)
+    # Pad with spaces for boundary matching
+    padded_title = f" {norm_title} "
+    padded_desc  = f" {norm_desc} "
+    padded_both  = f" {norm_title} {norm_desc} "
+
+    # ── Rejection check ──
+    for pattern in REJECTION_COMPILED:
+        if pattern.search(padded_both):
+            return {"score": -1, "tier": "LOW",
+                    "candidates": [], "topics": []}
+
+    score = 0
+
+    # ── Layer 1: Core election ──
+    for pattern, title_pts, desc_pts in LAYER1_COMPILED:
+        if pattern.search(padded_title):
+            score += title_pts
+        elif pattern.search(padded_desc):
+            score += desc_pts
+
+    # ── Layer 2: Contextual ──
+    for pattern, title_pts, desc_pts in LAYER2_COMPILED:
+        if pattern.search(padded_title):
+            score += title_pts
+        elif pattern.search(padded_desc):
+            score += desc_pts
+
+    # ── Candidate detection ──
+    candidates_found: list[str] = []
+    for pattern, name in CANDIDATE_PATTERNS:
+        if pattern.search(padded_both):
+            candidates_found.append(name)
+            if pattern.search(padded_title):
+                score += 2
+            else:
+                score += 1
+
+    # ── Topic extraction (no scoring, just tagging) ──
+    topics_found: list[str] = []
+    for topic, patterns in TOPIC_COMPILED.items():
+        for pat in patterns:
+            if pat.search(padded_both):
+                if topic not in topics_found:
+                    topics_found.append(topic)
+                break
+
+    # ── Multi-signal boost ──
+    if candidates_found and score >= SCORE_MEDIUM:
+        score += 2
+    if len(topics_found) >= 2 and score >= SCORE_MEDIUM:
+        score += 1
+
+    # ── Tier ──
+    if score >= SCORE_HIGH:
+        tier = "HIGH"
+    elif score >= SCORE_MEDIUM:
+        tier = "MEDIUM"
+    else:
+        tier = "LOW"
+
+    return {
+        "score":      score,
+        "tier":       tier,
+        "candidates": candidates_found,
+        "topics":     topics_found,
+    }
+
+
+# ═══════════════════════════════════════════════════════════
+# SECTION 7 — PUBLISH SINGLE ITEM
 # ═══════════════════════════════════════════════════════════
 
 async def _publish_item(
-    item: dict,
-    bot: Bot,
-    chat_id: str,
-    db: '_AppwriteDB',
-    loop: asyncio.AbstractEventLoop,
-    now: datetime,
-    _remaining,
+    item: dict, bot: Bot, chat_id: str,
+    db: '_AppwriteDB', loop: asyncio.AbstractEventLoop,
+    now: datetime, _remaining,
 ) -> bool:
-    """
-    Atomic publish: save to DB → collect images → build caption → post.
-    If DB save fails, skip post entirely.
-    """
     title        = item.get("title", "")
     link         = item.get("link", "")
     desc         = item.get("desc", "")
@@ -592,9 +809,9 @@ async def _publish_item(
     pub_date     = item.get("pub_date")
 
     # ── Save to DB BEFORE posting ──
-    save_budget = min(DB_TIMEOUT, _remaining() - 7)
+    save_budget = min(DB_TIMEOUT, _remaining() - 6)
     if save_budget < 1:
-        _log("No time for DB save.", level="WARN")
+        log.warn("No time for DB save")
         return False
 
     pub_iso = pub_date.isoformat() if pub_date else now.isoformat()
@@ -603,23 +820,22 @@ async def _publish_item(
         saved = await asyncio.wait_for(
             loop.run_in_executor(
                 None, db.save,
-                link, title, content_hash, source, feed_url,
-                pub_iso, now.isoformat(), score, tier,
-                ",".join(candidates), ",".join(topics),
+                link, title, content_hash, source,
+                feed_url, pub_iso, now.isoformat(),
             ),
             timeout=save_budget,
         )
     except asyncio.TimeoutError:
-        _log("DB save timed out — skip post.", level="WARN")
+        log.warn(f"DB save timed out for [{source}] {title[:40]}")
         return False
 
     if not saved:
-        _log(f"DB save failed for [{source}] {title[:40]}", level="WARN")
+        log.info(f"DB save rejected (409/error) [{source}] {title[:40]}")
         return False
 
     # ── Collect images ──
     image_urls: list[str] = []
-    img_budget = min(IMAGE_SCRAPE_TIMEOUT, _remaining() - 6)
+    img_budget = min(IMAGE_SCRAPE_TIMEOUT, _remaining() - 5)
     if img_budget > 1:
         entry = item.get("entry")
         if entry:
@@ -638,7 +854,7 @@ async def _publish_item(
     # ── Post to Telegram ──
     tg_budget = min(TELEGRAM_TIMEOUT, _remaining() - 2)
     if tg_budget < 2:
-        _log("No time for Telegram post.", level="WARN")
+        log.warn("No time for Telegram post")
         return False
 
     try:
@@ -647,203 +863,23 @@ async def _publish_item(
             timeout=tg_budget,
         )
     except asyncio.TimeoutError:
-        _log("Telegram post timed out.", level="WARN")
+        log.warn("Telegram post timed out")
         success = False
 
     if success:
-        _log_item("POSTED", source, title, score, tier,
-                  candidates=candidates, topics=topics)
-
-    # Clean buffer entry if it came from buffer
-    if success and item.get("buffer_doc_id"):
-        try:
-            await asyncio.wait_for(
-                loop.run_in_executor(
-                    None, db.delete_buffer_item, item["buffer_doc_id"]
-                ),
-                timeout=1,
-            )
-        except Exception:
-            pass
+        log.item("POSTED", source, title, score, tier,
+                 candidates=candidates, topics=topics)
 
     return success
 
 
 # ═══════════════════════════════════════════════════════════
-# SECTION 5 — DUAL-LAYER SCORING ENGINE
-# ═══════════════════════════════════════════════════════════
-
-def _score_article(title: str, desc: str) -> dict:
-    """
-    Dual-layer scoring with entity extraction.
-
-    Returns:
-        {
-            "score": int,
-            "tier": "HIGH" | "MEDIUM" | "LOW",
-            "candidates": list[str],
-            "topics": list[str],
-        }
-    """
-    norm_title = _normalize_text(title)
-    norm_desc  = _normalize_text(desc)
-    combined   = norm_title + " " + norm_desc
-    raw_combined = title + " " + desc
-
-    # ── Rejection check ──
-    for kw in REJECTION_KEYWORDS:
-        if _normalize_text(kw) in combined:
-            return {"score": -1, "tier": "LOW",
-                    "candidates": [], "topics": []}
-
-    score = 0
-
-    # ── Layer 1: Core election keywords ──
-    for kw in LAYER1_KEYWORDS:
-        kw_n = _normalize_text(kw)
-        if not kw_n:
-            continue
-        if kw_n in norm_title:
-            score += 3
-        elif kw_n in norm_desc:
-            score += 1
-
-    # ── Layer 2: Contextual political keywords ──
-    for kw in LAYER2_KEYWORDS:
-        kw_n = _normalize_text(kw)
-        if not kw_n:
-            continue
-        if kw_n in norm_title:
-            score += 2
-        elif kw_n in norm_desc:
-            score += 1
-
-    # ── Candidate name boost ──
-    candidates_found: list[str] = []
-    for name in KNOWN_CANDIDATES:
-        name_n = _normalize_text(name)
-        if name_n in combined:
-            candidates_found.append(name)
-            if name_n in norm_title:
-                score += 2
-            else:
-                score += 1
-
-    # ── Topic extraction ──
-    topics_found: list[str] = []
-    for topic, patterns in TOPIC_PATTERNS.items():
-        for pat in patterns:
-            pat_n = _normalize_text(pat)
-            if pat_n and pat_n in combined:
-                if topic not in topics_found:
-                    topics_found.append(topic)
-                break
-
-    # ── Multi-signal boost ──
-    if candidates_found and topics_found:
-        score += 2
-    if len(candidates_found) >= 2:
-        score += 1
-
-    # ── Determine tier ──
-    if score >= SCORE_HIGH:
-        tier = "HIGH"
-    elif score >= SCORE_MEDIUM:
-        tier = "MEDIUM"
-    else:
-        tier = "LOW"
-
-    return {
-        "score":      score,
-        "tier":       tier,
-        "candidates": candidates_found,
-        "topics":     topics_found,
-    }
-
-
-# ═══════════════════════════════════════════════════════════
-# SECTION 6 — PARALLEL FEED FETCHER
-# ═══════════════════════════════════════════════════════════
-
-async def _fetch_all_feeds_parallel(loop: asyncio.AbstractEventLoop) -> list[dict]:
-    tasks = [
-        loop.run_in_executor(None, _fetch_one_feed, url, name)
-        for url, name in RSS_SOURCES
-    ]
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-
-    all_entries: list[dict] = []
-    for i, result in enumerate(results):
-        if isinstance(result, Exception):
-            _log(f"{RSS_SOURCES[i][1]}: {result}", level="ERROR")
-            continue
-        if result:
-            all_entries.extend(result)
-    return all_entries
-
-
-def _fetch_one_feed(url: str, source_name: str) -> list[dict]:
-    try:
-        resp = requests.get(
-            url,
-            timeout=FEED_FETCH_TIMEOUT,
-            headers={
-                "User-Agent": "Mozilla/5.0 (compatible; ElectionBot/3.0)",
-                "Accept":     "application/rss+xml, application/xml, */*",
-            },
-        )
-        if resp.status_code != 200:
-            _log(f"{source_name}: HTTP {resp.status_code}", level="WARN")
-            return []
-
-        feed = feedparser.parse(resp.content)
-        if feed.bozo and not feed.entries:
-            _log(f"{source_name}: Malformed feed", level="WARN")
-            return []
-
-        entries = []
-        for entry in feed.entries:
-            title = _clean(entry.get("title", ""))
-            link  = _clean(entry.get("link",  ""))
-            if not title or not link:
-                continue
-
-            raw_html = (
-                entry.get("summary")
-                or entry.get("description")
-                or ""
-            )
-            desc     = _truncate(_strip_html(raw_html), MAX_DESCRIPTION_CHARS)
-            pub_date = _parse_date(entry)
-
-            entries.append({
-                "title":    title,
-                "link":     link,
-                "desc":     desc,
-                "pub_date": pub_date,
-                "source":   source_name,
-                "feed_url": url,
-                "entry":    entry,
-            })
-
-        _log(f"[FEED] {source_name}: {len(entries)} entries")
-        return entries
-
-    except requests.RequestException as e:
-        _log(f"{source_name} fetch: {e}", level="ERROR")
-        return []
-    except Exception as e:
-        _log(f"{source_name} parse: {e}", level="ERROR")
-        return []
-
-
-# ═══════════════════════════════════════════════════════════
-# SECTION 7 — APPWRITE DATABASE CLIENT
+# SECTION 8 — APPWRITE DB
 # ═══════════════════════════════════════════════════════════
 
 class _AppwriteDB:
     """
-    Appwrite schema (collection "history"):
+    Schema (collection "history"):
       link           string  700  required, indexed
       title          string  300
       site           string  100
@@ -851,34 +887,12 @@ class _AppwriteDB:
       created_at     datetime
       feed_url       string  500
       content_hash   string  128  indexed
-
-    Buffer collection ("buffer"):
-      link           string  700
-      title          string  300
-      content_hash   string  128  indexed
-      site           string  100
-      feed_url       string  500
-      desc           string  500
-      score          integer
-      score_tier     string  10
-      candidates     string  500
-      topics         string  300
-      buffered_at    datetime
     """
 
     def __init__(self, endpoint, project, key, database_id, collection_id):
-        self._endpoint = endpoint
-        self._database_id = database_id
-        self._history_url = (
+        self._url = (
             f"{endpoint}/databases/{database_id}"
             f"/collections/{collection_id}/documents"
-        )
-        self._buffer_collection = os.environ.get(
-            "APPWRITE_BUFFER_COLLECTION_ID", "buffer"
-        )
-        self._buffer_url = (
-            f"{endpoint}/databases/{database_id}"
-            f"/collections/{self._buffer_collection}/documents"
         )
         self._headers = {
             "Content-Type":       "application/json",
@@ -889,13 +903,13 @@ class _AppwriteDB:
     def load_recent(self, limit: int = 500) -> list[dict]:
         try:
             resp = requests.get(
-                self._history_url,
+                self._url,
                 headers=self._headers,
                 params={"limit": str(limit), "orderType": "DESC"},
                 timeout=DB_TIMEOUT,
             )
             if resp.status_code != 200:
-                _log(f"DB load_recent: HTTP {resp.status_code}", level="WARN")
+                log.warn(f"DB load_recent: HTTP {resp.status_code}")
                 return []
             docs = resp.json().get("documents", [])
             return [
@@ -904,128 +918,51 @@ class _AppwriteDB:
                     "title":        d.get("title", ""),
                     "content_hash": d.get("content_hash", ""),
                     "created_at":   d.get("created_at", ""),
-                    "score_tier":   d.get("score_tier", "high"),
                 }
                 for d in docs
             ]
+        except requests.exceptions.Timeout:
+            raise
         except Exception as e:
-            _log(f"DB load_recent: {e}", level="WARN")
-            return []
-
-    def load_buffer(self) -> list[dict]:
-        try:
-            resp = requests.get(
-                self._buffer_url,
-                headers=self._headers,
-                params={"limit": "50", "orderType": "DESC"},
-                timeout=DB_TIMEOUT,
-            )
-            if resp.status_code != 200:
-                return []
-            docs = resp.json().get("documents", [])
-            return [
-                {
-                    "link":          d.get("link", ""),
-                    "title":         d.get("title", ""),
-                    "content_hash":  d.get("content_hash", ""),
-                    "source":        d.get("site", ""),
-                    "feed_url":      d.get("feed_url", ""),
-                    "desc":          d.get("desc", ""),
-                    "score":         d.get("score", 0),
-                    "tier":          d.get("score_tier", "MEDIUM"),
-                    "candidates":    (d.get("candidates", "") or "").split(","),
-                    "topics":        (d.get("topics", "") or "").split(","),
-                    "buffered_at":   d.get("buffered_at", ""),
-                    "buffer_doc_id": d.get("$id", ""),
-                }
-                for d in docs
-            ]
-        except Exception as e:
-            _log(f"DB load_buffer: {e}", level="WARN")
+            log.error(f"DB load_recent: {e}")
             return []
 
     def save(self, link: str, title: str, content_hash: str,
              site: str, feed_url: str, published_at: str,
-             created_at: str, score: int = 0, score_tier: str = "",
-             candidates: str = "", topics: str = "") -> bool:
+             created_at: str) -> bool:
         doc_id = content_hash[:36]
-        data = {
-            "link":         link[:700],
-            "title":        title[:300],
-            "content_hash": content_hash[:128],
-            "site":         site[:100],
-            "feed_url":     feed_url[:500],
-            "published_at": published_at,
-            "created_at":   created_at,
-        }
         try:
             resp = requests.post(
-                self._history_url,
+                self._url,
                 headers=self._headers,
-                json={"documentId": doc_id, "data": data},
+                json={
+                    "documentId": doc_id,
+                    "data": {
+                        "link":         link[:700],
+                        "title":        title[:300],
+                        "content_hash": content_hash[:128],
+                        "site":         site[:100],
+                        "feed_url":     feed_url[:500],
+                        "published_at": published_at,
+                        "created_at":   created_at,
+                    },
+                },
                 timeout=DB_TIMEOUT,
             )
             if resp.status_code in (200, 201):
                 return True
             if resp.status_code == 409:
-                _log("DB 409 — already exists")
+                log.info("DB 409 — already exists")
                 return False
-            _log(f"DB save {resp.status_code}: {resp.text[:200]}", level="WARN")
+            log.warn(f"DB save {resp.status_code}: {resp.text[:150]}")
             return False
         except Exception as e:
-            _log(f"DB save: {e}", level="WARN")
-            return False
-
-    def save_buffer(self, link: str, title: str, content_hash: str,
-                    site: str, feed_url: str, desc: str,
-                    score: int, score_tier: str,
-                    candidates: str, topics: str,
-                    buffered_at: str) -> bool:
-        doc_id = f"buf_{content_hash[:30]}"
-        data = {
-            "link":         link[:700],
-            "title":        title[:300],
-            "content_hash": content_hash[:128],
-            "site":         site[:100],
-            "feed_url":     feed_url[:500],
-            "desc":         desc[:500],
-            "score":        score,
-            "score_tier":   score_tier[:10],
-            "candidates":   candidates[:500],
-            "topics":       topics[:300],
-            "buffered_at":  buffered_at,
-        }
-        try:
-            resp = requests.post(
-                self._buffer_url,
-                headers=self._headers,
-                json={"documentId": doc_id, "data": data},
-                timeout=DB_TIMEOUT,
-            )
-            if resp.status_code in (200, 201):
-                return True
-            if resp.status_code == 409:
-                return True  # already buffered
-            _log(f"Buffer save {resp.status_code}: {resp.text[:100]}", level="WARN")
-            return False
-        except Exception as e:
-            _log(f"Buffer save: {e}", level="WARN")
-            return False
-
-    def delete_buffer_item(self, doc_id: str) -> bool:
-        try:
-            resp = requests.delete(
-                f"{self._buffer_url}/{doc_id}",
-                headers=self._headers,
-                timeout=DB_TIMEOUT,
-            )
-            return resp.status_code in (200, 204)
-        except Exception:
+            log.warn(f"DB save: {e}")
             return False
 
 
 # ═══════════════════════════════════════════════════════════
-# SECTION 8 — CONFIG LOADER
+# SECTION 9 — CONFIG
 # ═══════════════════════════════════════════════════════════
 
 def _load_config() -> dict | None:
@@ -1041,13 +978,13 @@ def _load_config() -> dict | None:
     }
     missing = [k for k, v in cfg.items() if not v]
     if missing:
-        _log(f"Missing env vars: {missing}", level="ERROR")
+        log.error(f"Missing env vars: {missing}")
         return None
     return cfg
 
 
 # ═══════════════════════════════════════════════════════════
-# SECTION 9 — TEXT UTILITIES
+# SECTION 10 — TEXT UTILITIES
 # ═══════════════════════════════════════════════════════════
 
 def _clean(text: str) -> str:
@@ -1098,79 +1035,60 @@ def _escape_html(text: str) -> str:
 def _normalize_text(text: str) -> str:
     if not text:
         return ""
-    text = text.replace("ي", "ی").replace("ك", "ک")
-    text = text.replace("ة", "ه").replace("ؤ", "و")
-    text = text.replace("إ", "ا").replace("أ", "ا")
-    text = text.replace("ئ", "ی").replace("ى", "ی")
-    text = re.sub(r"[\u064B-\u065F\u0670]", "", text)
-    text = re.sub(r"[\u200c\u200d\u200e\u200f\ufeff]", "", text)
-    text = text.lower()
-    text = re.sub(r"[^\w\s\u0600-\u06FF]", " ", text)
-    text = " ".join(text.split())
+    t = _pre_normalize(text)
     tokens = [
-        t for t in text.split()
-        if t not in PERSIAN_STOPWORDS and len(t) >= 2
+        tok for tok in t.split()
+        if tok not in PERSIAN_STOPWORDS and len(tok) >= 2
     ]
     return " ".join(tokens)
 
 
 def _make_hash(title: str, desc: str = "") -> str:
-    norm_title = _normalize_text(title)
-    tokens = sorted(norm_title.split())
+    norm = _normalize_text(title)
+    tokens = sorted(norm.split())
     canonical = " ".join(tokens)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 # ═══════════════════════════════════════════════════════════
-# SECTION 10 — FUZZY DUPLICATE DETECTION
+# SECTION 11 — FUZZY DEDUP
 # ═══════════════════════════════════════════════════════════
 
-def _is_fuzzy_duplicate(title: str, recent_records: list[dict]) -> bool:
-    if not recent_records:
+def _is_fuzzy_duplicate(title: str, records: list[dict]) -> bool:
+    if not records:
         return False
     incoming = set(_normalize_text(title).split())
     if len(incoming) < 2:
         return False
-    for record in recent_records:
-        stored = set(record.get("title_norm", "").split())
+    for rec in records:
+        stored = set(rec.get("title_norm", "").split())
         if len(stored) < 2:
             continue
         inter = len(incoming & stored)
         if inter == 0:
             continue
-
-        min_size = min(len(incoming), len(stored))
-        overlap  = inter / min_size
-
+        min_sz  = min(len(incoming), len(stored))
+        overlap = inter / min_sz
         union   = len(incoming | stored)
         jaccard = inter / union
-
         if overlap >= 0.75 or jaccard >= FUZZY_THRESHOLD:
             return True
     return False
 
 
-def _is_buffer_mature(buffered_at_str: str, cutoff: datetime) -> bool:
-    try:
-        bt = datetime.fromisoformat(buffered_at_str.replace("Z", "+00:00"))
-        return bt <= cutoff
-    except (ValueError, TypeError):
-        return True
-
-
 # ═══════════════════════════════════════════════════════════
-# SECTION 11 — IMAGE COLLECTION
+# SECTION 12 — IMAGE COLLECTION
 # ═══════════════════════════════════════════════════════════
 
 async def _collect_images_async(
-    entry, article_url: str, loop: asyncio.AbstractEventLoop,
+    entry, url: str, loop: asyncio.AbstractEventLoop,
 ) -> list[str]:
     images = _extract_rss_images(entry)
     if not images:
         try:
             og = await asyncio.wait_for(
-                loop.run_in_executor(None, _fetch_og_image, article_url),
-                timeout=3.0,
+                loop.run_in_executor(None, _fetch_og_image, url),
+                timeout=2.5,
             )
             if og:
                 images.append(og)
@@ -1190,11 +1108,11 @@ def _extract_rss_images(entry) -> list[str]:
         lower = url.lower()
         if any(b in lower for b in IMAGE_BLOCKLIST):
             return
-        base     = lower.split("?")[0]
-        has_ext  = any(base.endswith(e) for e in IMAGE_EXTENSIONS)
-        has_word = any(w in lower for w in
-                       ["image", "photo", "img", "media", "cdn", "upload"])
-        if not has_ext and not has_word:
+        base    = lower.split("?")[0]
+        has_ext = any(base.endswith(e) for e in IMAGE_EXTENSIONS)
+        has_kw  = any(w in lower for w in
+                      ["image", "photo", "img", "media", "cdn", "upload"])
+        if not has_ext and not has_kw:
             return
         seen.add(url)
         images.append(url)
@@ -1228,9 +1146,9 @@ def _extract_rss_images(entry) -> list[str]:
         if raw_html:
             try:
                 soup = BeautifulSoup(raw_html, "lxml")
-                for img_tag in soup.find_all("img"):
+                for img in soup.find_all("img"):
                     for attr in ("src", "data-src", "data-lazy-src"):
-                        src = img_tag.get(attr, "")
+                        src = img.get(attr, "")
                         if src and src.startswith("http"):
                             _add(src)
                             break
@@ -1245,7 +1163,7 @@ def _extract_rss_images(entry) -> list[str]:
 def _fetch_og_image(url: str) -> str | None:
     try:
         resp = requests.get(
-            url, timeout=3,
+            url, timeout=2.5,
             headers={"User-Agent": "Mozilla/5.0"},
             allow_redirects=True,
         )
@@ -1267,18 +1185,18 @@ def _fetch_og_image(url: str) -> str | None:
 
 
 # ═══════════════════════════════════════════════════════════
-# SECTION 12 — CAPTION BUILDER + HASHTAGS
+# SECTION 13 — CAPTION + HASHTAGS
 # ═══════════════════════════════════════════════════════════
 
 def _generate_hashtags(title: str, desc: str,
                        topics: list[str] = None) -> list[str]:
-    norm = _normalize_text(title + " " + desc)
+    norm = _pre_normalize(title + " " + desc)
+    padded = f" {norm} "
     seen = set()
     tags = []
 
-    # Add topic-based hashtags first
     if topics:
-        topic_hashtags = {
+        topic_ht = {
             "صلاحیت":       "#صلاحیت",
             "ثبت‌نام":      "#ثبت_نام",
             "تبلیغات":      "#تبلیغات_انتخاباتی",
@@ -1286,21 +1204,18 @@ def _generate_hashtags(title: str, desc: str,
             "نتایج":        "#نتایج_انتخابات",
             "مجلس":         "#مجلس",
             "شورا":         "#شورای_شهر",
-            "اقتصاد":       "#اقتصاد",
-            "سیاست_خارجی":  "#سیاست_خارجی",
         }
-        for topic in topics:
-            ht = topic_hashtags.get(topic)
+        for t in topics:
+            ht = topic_ht.get(t)
             if ht and ht not in seen:
                 seen.add(ht)
                 tags.append(ht)
 
-    # Add keyword-based hashtags
     for keyword, hashtag in _HASHTAG_MAP:
         if len(tags) >= 5:
             break
-        kw_norm = _normalize_text(keyword)
-        if kw_norm and kw_norm in norm and hashtag not in seen:
+        kw_n = _pre_normalize(keyword)
+        if kw_n and kw_n in norm and hashtag not in seen:
             seen.add(hashtag)
             tags.append(hashtag)
 
@@ -1310,33 +1225,28 @@ def _generate_hashtags(title: str, desc: str,
     return tags[:6]
 
 
-def _build_caption(title: str, desc: str, hashtags: list[str] = None,
+def _build_caption(title: str, desc: str,
+                   hashtags: list[str] = None,
                    candidates: list[str] = None,
                    source: str = "") -> str:
     safe_title   = _escape_html(title.strip())
     safe_desc    = _escape_html(desc.strip())
     hashtag_line = " ".join(hashtags) if hashtags else "#انتخابات"
 
-    # Add candidate names as hashtags if present
     if candidates:
-        for c in candidates[:3]:
+        for c in candidates[:2]:
             c_tag = f"#{_escape_html(c.replace(' ', '_'))}"
             if c_tag not in hashtag_line:
                 hashtag_line += f" {c_tag}"
 
-    source_line = f"📰 {_escape_html(source)}" if source else ""
+    source_line = f"📰 {_escape_html(source)}\n" if source else ""
 
     caption = (
         f"💠 <b>{safe_title}</b>\n\n"
         f"{hashtag_line}\n\n"
         f"@candidatoryiran\n\n"
         f"{safe_desc}\n\n"
-    )
-
-    if source_line:
-        caption += f"{source_line}\n"
-
-    caption += (
+        f"{source_line}"
         f"🇮🇷🇮🇷🇮🇷🇮🇷🇮🇷🇮🇷🇮🇷\n"
         f"کانال خبری کاندیداتوری\n"
         f"🆔 @candidatoryiran\n"
@@ -1351,10 +1261,7 @@ def _build_caption(title: str, desc: str, hashtags: list[str] = None,
             f"{hashtag_line}\n\n"
             f"@candidatoryiran\n\n"
             f"{safe_desc}\n\n"
-        )
-        if source_line:
-            caption += f"{source_line}\n"
-        caption += (
+            f"{source_line}"
             f"🇮🇷🇮🇷🇮🇷🇮🇷🇮🇷🇮🇷🇮🇷\n"
             f"کانال خبری کاندیداتوری\n"
             f"🆔 @candidatoryiran\n"
@@ -1365,7 +1272,7 @@ def _build_caption(title: str, desc: str, hashtags: list[str] = None,
 
 
 # ═══════════════════════════════════════════════════════════
-# SECTION 13 — TELEGRAM POSTING
+# SECTION 14 — TELEGRAM POSTING
 # ═══════════════════════════════════════════════════════════
 
 async def _post_to_telegram(
@@ -1374,71 +1281,45 @@ async def _post_to_telegram(
 
     if len(image_urls) >= 2:
         try:
-            media_group = []
+            media = []
             for i, url in enumerate(image_urls[:MAX_IMAGES]):
                 if i == 0:
-                    media_group.append(InputMediaPhoto(
+                    media.append(InputMediaPhoto(
                         media=url, caption=caption, parse_mode="HTML",
                     ))
                 else:
-                    media_group.append(InputMediaPhoto(media=url))
-
-            sent = await bot.send_media_group(
-                chat_id=chat_id,
-                media=media_group,
+                    media.append(InputMediaPhoto(media=url))
+            await bot.send_media_group(
+                chat_id=chat_id, media=media,
                 disable_notification=True,
             )
             return True
         except TelegramError as e:
-            _log(f"Album failed: {e} — fallback", level="WARN")
+            log.warn(f"Album failed: {e} — fallback")
             image_urls = image_urls[:1]
 
     if len(image_urls) == 1:
         try:
             await bot.send_photo(
-                chat_id=chat_id,
-                photo=image_urls[0],
-                caption=caption,
-                parse_mode="HTML",
+                chat_id=chat_id, photo=image_urls[0],
+                caption=caption, parse_mode="HTML",
                 disable_notification=True,
             )
             return True
         except TelegramError as e:
-            _log(f"Photo failed: {e} — fallback to text", level="WARN")
+            log.warn(f"Photo failed: {e} — text fallback")
 
     try:
         await bot.send_message(
-            chat_id=chat_id,
-            text=caption,
+            chat_id=chat_id, text=caption,
             parse_mode="HTML",
             link_preview_options=LinkPreviewOptions(is_disabled=True),
             disable_notification=True,
         )
         return True
     except TelegramError as e:
-        _log(f"Text send failed: {e}", level="ERROR")
+        log.error(f"Text send failed: {e}")
         return False
-
-
-# ═══════════════════════════════════════════════════════════
-# SECTION 14 — LOGGING
-# ═══════════════════════════════════════════════════════════
-
-def _log(msg: str, level: str = "INFO"):
-    print(f"[{level}] {msg}")
-
-
-def _log_item(action: str, source: str, title: str,
-              score: int, tier: str,
-              candidates: list[str] = None,
-              topics: list[str] = None):
-    parts = [f"[{action}]", f"score={score}", f"tier={tier}",
-             f"[{source}]", title[:50]]
-    if candidates:
-        parts.append(f"cand={','.join(candidates[:3])}")
-    if topics:
-        parts.append(f"topic={','.join(topics[:3])}")
-    print(" ".join(parts))
 
 
 # ═══════════════════════════════════════════════════════════
