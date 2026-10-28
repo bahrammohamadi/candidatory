@@ -1,0 +1,1 @@
+name = "candidatory-news-bot"\nmain = "src/index.js"\ncompatibility_date = "2026-10-28"\n\n[triggers]\ncrons = ["*/15 * * * *"]\n\n# Add [[d1_databases]] binding NEWS_DB after creating a separate D1 database.\n
