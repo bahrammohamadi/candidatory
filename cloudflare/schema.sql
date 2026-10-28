@@ -1,0 +1,1 @@
+CREATE TABLE IF NOT EXISTS articles (id TEXT PRIMARY KEY,title TEXT NOT NULL,url TEXT NOT NULL,source TEXT NOT NULL,published_at TEXT,status TEXT NOT NULL DEFAULT 'pending_review',created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);\nCREATE INDEX IF NOT EXISTS idx_articles_status ON articles(status,created_at);\n
