@@ -10,20 +10,35 @@ export default {async fetch(request,env){const u=new URL(request.url);if(u.pathn
 async function run(env,time){await checkTelegramOnce(env);let totalFound=0,totalAccepted=0;for(const [source,url] of FEEDS){let items=[];try{const r=await fetch(url,{signal:AbortSignal.timeout(7000),headers:{'user-agent':'CandidatoryNewsBot/7.0 (+RSS monitoring)'}});if(!r.ok)throw Error('RSS HTTP '+r.status);items=parse(new TextDecoder('utf-8').decode(await r.arrayBuffer()),source)}catch(e){console.error('fetch failed',source,String(e));continue}totalFound+=items.length;let accepted=0;for(const item of items){if(!isElection(item.title))continue;const id=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(item.link));const hash=[...new Uint8Array(id)].map(x=>x.toString(16).padStart(2,'0')).join('');if(env.NEWS_DB){const result=await env.NEWS_DB.prepare('INSERT OR IGNORE INTO articles (id,title,url,source,published_at,status) VALUES (?,?,?,?,?,?)').bind(hash,item.title,item.link,item.source,item.date||null,'pending_review').run();if(result.meta?.changes){accepted++;totalAccepted++}}}console.log(JSON.stringify({source,found:items.length,accepted}))}if(env.PUBLISH_ENABLED==='true'&&env.TELEGRAM_BOT_TOKEN){await publishOne(env)}console.log(JSON.stringify({totalFound,totalAccepted,publishing:env.PUBLISH_ENABLED==='true'}))}
 
 function escapeHtml(s){return String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
+function getMeta(html,key){const tags=html.match(/<meta\b[^>]*>/gi)||[];for(const t of tags){const attrs={};for(const m of t.matchAll(/([\w:-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g))attrs[m[1].toLowerCase()]=m[2]??m[3];if(attrs.property===key||attrs.name===key)return attrs.content||''}return ''}
+function cleanSummary(s){return fixEncoding(String(s||'').replace(/<[^>]*>/g,' ').replace(/&amp;/g,'&').replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/\s+/g,' ').trim())}
 async function publishOne(env){
  const row=await env.NEWS_DB.prepare("SELECT id,title,url,source FROM articles WHERE status='pending_review' ORDER BY created_at ASC LIMIT 1").first();
  if(!row)return;
+ let link;try{const u=new URL(row.url);if(!['http:','https:'].includes(u.protocol))throw Error('invalid protocol');link=u.href}catch{return}
+ let summary='',photo='';
+ try{
+  const r=await fetch(link,{signal:AbortSignal.timeout(5000),headers:{'user-agent':'Mozilla/5.0 (compatible; CandidatoryNewsBot/1.0)'}});
+  if(r.ok){const html=(await r.text()).slice(0,250000);summary=cleanSummary(getMeta(html,'og:description')||getMeta(html,'description'));photo=getMeta(html,'og:image');if(photo)photo=new URL(photo,link).href}
+ }catch(e){console.warn('Article metadata unavailable',row.source,String(e))}
  const title=escapeHtml(fixEncoding(row.title));
  const source=escapeHtml(row.source);
- let link;try{const u=new URL(row.url);if(!['http:','https:'].includes(u.protocol))throw Error('protocol');link=u.href}catch(e){console.error('Invalid article URL',row.id);return}
- const text='🗳 <b>اخبار انتخابات | کاندیداتوری</b>\n\n<b>'+title+'</b>\n\n📰 <b>منبع:</b> '+source+'\n🔗 <a href="'+escapeHtml(link)+'">مطالعه خبر در منبع اصلی</a>\n\n#اخبار_انتخابات #کاندیداتوری\n@candidatoryiran';
- const payload={chat_id:'@candidatoryiran',text,parse_mode:'HTML',link_preview_options:{is_disabled:true},reply_markup:{inline_keyboard:[[{text:'📖 مشاهده متن خبر',url:link}]]}};
+ const separator='━━━━━━━━━━━━━━';
+ const footer='🇮🇷 کانال خبری کاندیداتوری\n🆔 @candidatoryiran\n🆔 Instagram.com/candidatory.ir';
+ const lead='💠 <b>'+title+'</b>\n\n';
+ const ending='\n\n📰 '+source+'\n\n'+footer+'\n\n'+separator+'\n🔗 <a href="'+escapeHtml(link)+'">مشاهده خبر در منبع اصلی</a>';
+ const maxSummary=photo?Math.max(0,920-(lead+ending).length):Math.max(0,3800-(lead+ending).length);
+ if(summary.length>maxSummary)summary=summary.slice(0,Math.max(0,maxSummary-1)).trimEnd()+'…';
+ const text=lead+(summary?escapeHtml(summary):'')+ending;
+ const base={chat_id:'@candidatoryiran',parse_mode:'HTML',link_preview_options:{is_disabled:true}};
+ async function send(method,payload){const r=await fetch('https://api.telegram.org/bot'+env.TELEGRAM_BOT_TOKEN+'/'+method,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(payload)});return r.json()}
  try{
-  const response=await fetch('https://api.telegram.org/bot'+env.TELEGRAM_BOT_TOKEN+'/sendMessage',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(payload)});
-  const data=await response.json();
+  let data;
+  if(photo&&/^https:\/\//.test(photo)&&text.length<1024)data=await send('sendPhoto',{chat_id:base.chat_id,photo,caption:text,parse_mode:'HTML'});
+  if(!data?.ok){if(data)console.warn('Photo send failed; text fallback',data.description);data=await send('sendMessage',{...base,text})}
   if(!data.ok){console.error('Telegram publish failed',data.error_code,data.description);return}
   await env.NEWS_DB.prepare("UPDATE articles SET status='published' WHERE id=?").bind(row.id).run();
-  console.log('Published formatted news',row.id,data.result?.message_id)
+  console.log('Published news',row.id,data.result?.message_id,photo?'photo-attempted':'text')
  }catch(e){console.error('Telegram publish exception',String(e))}
 }
 
