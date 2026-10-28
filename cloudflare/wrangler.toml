@@ -1,4 +1,4 @@
-name = "candidatory-news-bot"\nmain = "src/index.js"\ncompatibility_date = "2026-10-28"\n\n[triggers]\ncrons = ["*/15 * * * *"]\n\n[[d1_databases]]
+name = "candidatory-news-bot"\nmain = "src/index.js"\ncompatibility_date = "2026-10-28"\n\n[triggers]\ncrons = ["*/5 * * * *"]\n\n[[d1_databases]]
 binding = "NEWS_DB"
 database_name = "candidatory-news"
 database_id = "5f5e3a65-ed02-4c5a-bbf3-472eac9edd7f"\n
