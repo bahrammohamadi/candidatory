@@ -170,13 +170,13 @@ async function calendarEvents(time){
     const match=source.name==='Persian Calendar'?Number(item.year_sh)===year&&Number(item.month_sh)===month&&Number(item.day_sh)===day:String(item.date)===date;
     const title=source.name==='Persian Calendar'?item.title_fa:item.title?.fa;
     const category=String(item.category||'');
-    if(match&&typeof title==='string'&&title.trim().length>2&&title.length<110&&!/https?:|\\n|\\r/.test(title)&&!['fun','countries'].includes(category))collected.push({title:title.trim(),source:source.name,holiday:!!item.is_holiday});
+    if(match&&typeof title==='string'&&title.trim().length>2&&title.length<110&&!/https?:|\n|\r/.test(title)&&!['fun','countries'].includes(category))collected.push({title:title.trim(),source:source.name,holiday:!!item.is_holiday});
    }
    console.log('calendar source',source.name,'records',records.length,'matched',collected.length);
   }catch(e){console.warn('calendar source failed',source.name,String(e))}
  }
  const unique=new Map();
- for(const event of collected){const key=event.title.normalize('NFKC').replace(/\\s+/g,' ').replace(/[ي]/g,'ی').replace(/[ك]/g,'ک');if(!unique.has(key))unique.set(key,event)}
+ for(const event of collected){const key=event.title.normalize('NFKC').replace(/\s+/g,' ').replace(/[ي]/g,'ی').replace(/[ك]/g,'ک');if(!unique.has(key))unique.set(key,event)}
  return [...unique.values()].slice(0,5);
 }
 async function verifiedCalendar(time){
@@ -187,7 +187,7 @@ async function verifiedCalendar(time){
  const events=await calendarEvents(time);
  const lines=['📅 '+solar,'🗓 میلادی: '+greg,'🌙 قمری (محاسباتی): '+islamic];
  if(events.length){lines.push('','📌 مناسبت‌های امروز:');for(const event of events)lines.push('• '+event.title+(event.holiday?' (تعطیل رسمی)':''))}
- return lines.join('\\n');
+ return lines.join('\n');
 }
 function tehranClock(time){const parts=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Tehran',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).formatToParts(new Date(time));const p=Object.fromEntries(parts.map(x=>[x.type,x.value]));return {date:p.year+'-'+p.month+'-'+p.day,clock:p.hour+':'+p.minute,day:Number(p.day)}}
 function normalizeDaily(s){return String(s).normalize('NFKC').replace(/[ي]/g,'ی').replace(/[ك]/g,'ک').replace(/\s+/g,' ').trim()}
