@@ -255,18 +255,37 @@ const SPECIAL_CATEGORIES=[
 function specialSelection(time,slotIndex){const d=tehranClock(time);const ordinal=Math.floor(Date.parse(d.date+'T00:00:00Z')/86400000);return SPECIAL_CATEGORIES[(ordinal*3+slotIndex)%SPECIAL_CATEGORIES.length]}
 async function specialGemini(env,category,seed){
  if(!env.GEMINI_API_KEY)return null;
- const instruction='سردبیر آموزشی فارسی و بی‌طرف هستی. فقط یک متن آماده انتشار ۶۰ تا ۱۰۰ کلمه‌ای بنویس. بدون مقدمه، برچسب، هشتگ، توصیه به رأی دادن به اشخاص، ادعای خبری جدید، تاریخ، عدد یا ماده قانونی ساختگی. موضوع: '+category.title+'. چارچوب: '+category.prompt+' موضوع دقیق: '+seed+'. اگر نیاز به اطلاعات خارج از چارچوب داری، فقط همان مفهوم عمومی را توضیح بده.';
+ const longForm=['civic','urban','history','leadership','technology','verify'].includes(category.id); const instruction='سردبیر آموزشی فارسی و بی‌طرف هستی. فقط یک متن آماده انتشار '+(longForm?'۱۲۰ تا ۱۸۰ کلمه‌ای در ۲ یا ۳ پاراگراف با یک خط خالی بین آن‌ها':'۶۰ تا ۱۰۰ کلمه‌ای')+' بنویس. بدون مقدمه، برچسب، هشتگ، توصیه به رأی دادن به اشخاص، ادعای خبری جدید، تاریخ، عدد یا ماده قانونی ساختگی. موضوع: '+category.title+'. چارچوب: '+category.prompt+' موضوع دقیق: '+seed+'. اگر نیاز به اطلاعات خارج از چارچوب داری، فقط همان مفهوم عمومی را توضیح بده.';
  try{
-  const r=await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent',{method:'POST',headers:{'content-type':'application/json','x-goog-api-key':env.GEMINI_API_KEY},body:JSON.stringify({contents:[{parts:[{text:instruction}]}],generationConfig:{temperature:0.45,maxOutputTokens:340}}),signal:AbortSignal.timeout(8500)});
+  const r=await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent',{method:'POST',headers:{'content-type':'application/json','x-goog-api-key':env.GEMINI_API_KEY},body:JSON.stringify({contents:[{parts:[{text:instruction}]}],generationConfig:{temperature:0.45,maxOutputTokens:650}}),signal:AbortSignal.timeout(8500)});
   if(!r.ok)return null;
   const j=await r.json();const s=j.candidates?.[0]?.content?.parts?.map(p=>p.text||'').join('').trim();
-  return s&&contentQuality(s,category.id)&&s.length<850?s:null;
+  return s&&contentQuality(s,category.id)&&s.length<1450?s:null;
  }catch(e){console.warn('special gemini fallback',String(e));return null}
 }
 async function specialDigest(env){
  const r=await env.NEWS_DB.prepare("SELECT title,url,source FROM articles WHERE status='published' AND created_at >= datetime('now','-1 day') ORDER BY created_at DESC LIMIT 5").all();
  const rows=r.results||[];if(!rows.length)return null;
  return 'مهم‌ترین خبرهای منتشرشده در ۲۴ ساعت گذشته:\n\n'+rows.map((x,i)=>(i+1)+'. '+fixEncoding(x.title)+'\n'+x.source+' | '+x.url).join('\n\n');
+}
+const COMMONS_IMAGE_TERMS={urban:'urban planning city park',history:'Persian architecture historical monument',leadership:'team meeting office',technology:'computer artificial intelligence technology',civic:'public library civic building',verify:'newspapers journalism fact checking'};
+async function commonsLicensedPhoto(kind){
+ const term=COMMONS_IMAGE_TERMS[kind];if(!term)return null;
+ try{
+  const api=new URL('https://commons.wikimedia.org/w/api.php');
+  api.searchParams.set('action','query');api.searchParams.set('generator','search');api.searchParams.set('gsrsearch','filetype:bitmap '+term);api.searchParams.set('gsrnamespace','6');api.searchParams.set('gsrlimit','8');api.searchParams.set('prop','imageinfo');api.searchParams.set('iiprop','url|mime|extmetadata');api.searchParams.set('iiurlwidth','1000');api.searchParams.set('format','json');
+  const r=await fetch(api.href,{signal:AbortSignal.timeout(6000),headers:{'user-agent':'CandidatoryEducationalBot/1.0 (media attribution)'}});
+  if(!r.ok)return null;
+  const data=await r.json();
+  for(const page of Object.values(data.query?.pages||{})){
+   const info=page.imageinfo?.[0],meta=info?.extmetadata||{},license=String(meta.LicenseShortName?.value||'').toLowerCase();
+   if(!/^image\/(jpeg|png)$/.test(String(info?.mime||''))||!/(cc by|public domain|cc0)/i.test(license))continue;
+   const url=info.thumburl||info.url;
+   if(!url?.startsWith('https://upload.wikimedia.org/'))continue;
+   return {url,credit:'📷 Wikimedia Commons ('+license.slice(0,40)+')',page:info.descriptionurl};
+  }
+ }catch(e){console.warn('commons image unavailable',kind,String(e))}
+ return null;
 }
 async function runSpecialContent(env,time){
  if(env.PUBLISH_ENABLED!=='true'||!env.TELEGRAM_BOT_TOKEN||!env.NEWS_DB)return;
@@ -289,8 +308,12 @@ async function runSpecialContent(env,time){
  const claim=await env.NEWS_DB.prepare("INSERT OR IGNORE INTO daily_content(id,kind,content,status) VALUES(?,?,?,'sending')").bind(id,kind,textContent).run();if(!claim.meta?.changes)return;
  const body=heading+'\n\n'+textContent+(index===3?'':'\n\n🔗 منبع برای مطالعه بیشتر: '+category.source);
  try{
-  const r=await fetch('https://api.telegram.org/bot'+env.TELEGRAM_BOT_TOKEN+'/sendMessage',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({chat_id:'@candidatoryiran',text:body,link_preview_options:{is_disabled:true}}),signal:AbortSignal.timeout(10000)});
-  const j=await r.json();
+  const photo=index!==3&&index!==1?await commonsLicensedPhoto(kind):null;
+  const caption=photo?body+'\n'+photo.credit+'\n'+photo.page:body;
+  const usePhoto=!!photo&&caption.length<=950;
+  let r=await fetch('https://api.telegram.org/bot'+env.TELEGRAM_BOT_TOKEN+'/'+(usePhoto?'sendPhoto':'sendMessage'),{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(usePhoto?{chat_id:'@candidatoryiran',photo:photo.url,caption}:{chat_id:'@candidatoryiran',text:body,link_preview_options:{is_disabled:true}}),signal:AbortSignal.timeout(10000)});
+  let j=await r.json();
+  if(usePhoto&&!j.ok){r=await fetch('https://api.telegram.org/bot'+env.TELEGRAM_BOT_TOKEN+'/sendMessage',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({chat_id:'@candidatoryiran',text:body,link_preview_options:{is_disabled:true}}),signal:AbortSignal.timeout(10000)});j=await r.json()}
   await env.NEWS_DB.prepare("UPDATE daily_content SET status=?,message_id=?,error=?,sent_at=CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE NULL END WHERE id=?").bind(j.ok?'published':'failed',j.result?.message_id??null,j.ok?null:String(j.description||'telegram error'),j.ok?1:0,id).run();
  }catch(e){await env.NEWS_DB.prepare("UPDATE daily_content SET status='failed',error=? WHERE id=?").bind(String(e),id).run()}
 }
