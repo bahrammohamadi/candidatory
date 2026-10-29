@@ -6,7 +6,7 @@ const REJECT=[/فوتبال/i,/رمزارز/i,/آشپزی/i,/سریال تلوی
 function decode(s){return s.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g,'$1').replace(/<[^>]*>/g,' ').replace(/&amp;/g,'&').replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/&lt;/g,'<').replace(/&gt;/g,'>').trim()}
 function tag(xml,name){const re=new RegExp('<'+name+'(?:\\s[^>]*)?>([\\s\\S]*?)<\\/'+name+'>','i');const m=xml.match(re);return m?fixEncoding(decode(m[1])):''}
 function parse(xml,source){return [...xml.matchAll(/<item(?:\s[^>]*)?>([\s\S]*?)<\/item>/gi)].slice(0,100).map(m=>({title:tag(m[1],'title'),link:tag(m[1],'link'),date:tag(m[1],'pubDate'),source})).filter(x=>x.title&&/^https?:\/\//.test(x.link))}
-export default {async fetch(request,env){const u=new URL(request.url);if(u.pathname==='/health')return Response.json({ok:true,mode:'news-worker',publishing:env.PUBLISH_ENABLED==='true',telegramConfigured:!!env.TELEGRAM_BOT_TOKEN});if(u.pathname==='/bot-identity'){if(!env.TELEGRAM_BOT_TOKEN)return Response.json({ok:false,error:'missing_token'},{status:503});const r=await fetch('https://api.telegram.org/bot'+env.TELEGRAM_BOT_TOKEN+'/getMe');const j=await r.json();return Response.json({ok:j.ok,username:j.result?.username,botId:j.result?.id,error:j.description},{status:j.ok?200:502})}if(u.pathname==='/test-publish'){const key=request.headers.get('x-test-key');if(!env.TEST_PUBLISH_KEY||key!==env.TEST_PUBLISH_KEY)return new Response('Unauthorized',{status:401});if(!env.TELEGRAM_BOT_TOKEN)return Response.json({ok:false,error:'Missing Telegram secret'},{status:503});const payload={chat_id:'@candidatoryiran',text:'🧪 پیام آزمایشی کاندیداتوری\n\nاتصال Cloudflare Workers به کانال تلگرام در حال بررسی است. این پیام خبر نیست و صرفاً برای آزمایش ارسال شده است.\n\n@candidatoryiran'};const response=await fetch('https://api.telegram.org/bot'+env.TELEGRAM_BOT_TOKEN+'/sendMessage',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(payload)});const data=await response.json();return Response.json({ok:!!data.ok,messageId:data.result?.message_id,errorCode:data.error_code,description:data.ok?undefined:data.description},{status:data.ok?200:502})}if(u.pathname==='/diagnostics'){const checks=await Promise.all(FEEDS.map(async ([source,url])=>{try{const r=await fetch(url,{signal:AbortSignal.timeout(6500)});const raw=new TextDecoder('utf-8').decode(await r.arrayBuffer());const items=parse(raw,source);return {source,http:r.status,items:items.length,matching:items.filter(x=>isElection(x.title)).length,contentType:r.headers.get('content-type'),sample:items[0]?.title||raw.slice(0,70)}}catch(e){return {source,error:String(e)}}}));return Response.json({checks})}return new Response('Not found',{status:404})},async scheduled(event,env,ctx){ctx.waitUntil(Promise.allSettled([run(env,event.scheduledTime),runDailyContent(env,event.scheduledTime),probeGeminiOnce(env)]))}};
+export default {async fetch(request,env){const u=new URL(request.url);if(u.pathname==='/health')return Response.json({ok:true,mode:'news-worker',publishing:env.PUBLISH_ENABLED==='true',telegramConfigured:!!env.TELEGRAM_BOT_TOKEN});if(u.pathname==='/bot-identity'){if(!env.TELEGRAM_BOT_TOKEN)return Response.json({ok:false,error:'missing_token'},{status:503});const r=await fetch('https://api.telegram.org/bot'+env.TELEGRAM_BOT_TOKEN+'/getMe');const j=await r.json();return Response.json({ok:j.ok,username:j.result?.username,botId:j.result?.id,error:j.description},{status:j.ok?200:502})}if(u.pathname==='/test-publish'){const key=request.headers.get('x-test-key');if(!env.TEST_PUBLISH_KEY||key!==env.TEST_PUBLISH_KEY)return new Response('Unauthorized',{status:401});if(!env.TELEGRAM_BOT_TOKEN)return Response.json({ok:false,error:'Missing Telegram secret'},{status:503});const payload={chat_id:'@candidatoryiran',text:'🧪 پیام آزمایشی کاندیداتوری\n\nاتصال Cloudflare Workers به کانال تلگرام در حال بررسی است. این پیام خبر نیست و صرفاً برای آزمایش ارسال شده است.\n\n@candidatoryiran'};const response=await fetch('https://api.telegram.org/bot'+env.TELEGRAM_BOT_TOKEN+'/sendMessage',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(payload)});const data=await response.json();return Response.json({ok:!!data.ok,messageId:data.result?.message_id,errorCode:data.error_code,description:data.ok?undefined:data.description},{status:data.ok?200:502})}if(u.pathname==='/diagnostics'){const checks=await Promise.all(FEEDS.map(async ([source,url])=>{try{const r=await fetch(url,{signal:AbortSignal.timeout(6500)});const raw=new TextDecoder('utf-8').decode(await r.arrayBuffer());const items=parse(raw,source);return {source,http:r.status,items:items.length,matching:items.filter(x=>isElection(x.title)).length,contentType:r.headers.get('content-type'),sample:items[0]?.title||raw.slice(0,70)}}catch(e){return {source,error:String(e)}}}));return Response.json({checks})}return new Response('Not found',{status:404})},async scheduled(event,env,ctx){ctx.waitUntil(Promise.allSettled([run(env,event.scheduledTime),runDailyContent(env,event.scheduledTime),probeGeminiOnce(env),runSpecialContent(env,event.scheduledTime)]))}};
 const NEWS_MAX_AGE_HOURS=36;
 function canonicalNewsUrl(raw){try{const u=new URL(raw);u.hash='';u.hostname=u.hostname.toLowerCase().replace(/^www\./,'');for(const k of [...u.searchParams.keys()])if(/^(utm_|fbclid$|gclid$|ref$|source$|output$)/i.test(k))u.searchParams.delete(k);u.searchParams.sort();u.pathname=u.pathname.replace(/\/$/,'')||'/';return u.href}catch{return raw}}
 function normalizedHeadline(s){return fixEncoding(s).normalize('NFKC').toLowerCase().replace(/[ي]/g,'ی').replace(/[ك]/g,'ک').replace(/[أإآ]/g,'ا').replace(/[^\p{L}\p{N}]+/gu,' ').replace(/\s+/g,' ').trim()}
@@ -238,4 +238,59 @@ async function probeGeminiOnce(env){
  }catch(e){result='error:'+String(e).slice(0,220)}
  await env.NEWS_DB.prepare('UPDATE news_diagnostics SET result=?,updated_at=CURRENT_TIMESTAMP WHERE name=?').bind(result,key).run();
  console.log('Gemini probe result',result)
+}
+
+
+const SPECIAL_SLOTS=['10:45','15:45','20:45','22:00'];
+const SPECIAL_CATEGORIES=[
+ {id:'civic',title:'⚖️ حقوق شهروندی و انتخابات',source:'https://www.moi.ir',prompt:'توضیح بی‌طرفانه یک مفهوم حقوق شهروندی؛ بدون تشویق به رأی به فرد یا گروه و بدون نقل ماده قانونی تأییدنشده.',cards:['حق دسترسی به اطلاعات عمومی و اهمیت مراجعه به متن قوانین و اطلاعیه‌های رسمی را توضیح بده.','تفاوت «حق قانونی» با «وعده انتخاباتی» را با یک مثال فرضی روشن کن.','چرا هنگام بررسی شرایط نامزدی باید تاریخ آخرین اصلاح قانون را بررسی کرد؟']},
+ {id:'urban',title:'🏙 مدیریت شهری',source:'https://www.tehran.ir',prompt:'توضیح آموزشی یک مفهوم مدیریت شهری بدون ادعای آماری یا محلی تأییدنشده.',cards:['فرق وظایف سیاست‌گذاری شورا و اجرای امور شهری توسط شهرداری را به زبان ساده توضیح بده.','چطور شهروندان می‌توانند یک مشکل محله را دقیق و قابل پیگیری گزارش کنند؟','چرا اولویت‌بندی پروژه‌های شهری باید شفاف و قابل ارزیابی باشد؟']},
+ {id:'verify',title:'🔎 راستی‌آزمایی اخبار',source:'https://factnameh.com',prompt:'یک روش عملی بررسی صحت خبر؛ هیچ خبر واقعی را بدون سند درست یا نادرست اعلام نکن.',cards:['قبل از بازنشر یک خبر، تاریخ، منبع اولیه و متن کامل آن را بررسی کنیم.','فرق عکس قدیمی با خبر جدید را با یک سناریوی فرضی توضیح بده.','چرا چند کانال بازنشرکننده یک شایعه، لزوماً چند منبع مستقل نیستند؟']},
+ {id:'quiz',title:'🧩 آزمون و مسابقه',source:'https://www.unesco.org',prompt:'یک سؤال دانستنی با پاسخ قطعی و بدون موضوع سیاسی حساس.',cards:['سؤال: کدام روش برای بررسی یک خبر مناسب‌تر است؟ الف) تعداد بازنشرها ب) بررسی منبع اصلی ج) طول متن د) تعداد ایموجی‌ها. پاسخ: ب؛ منبع اصلی قابل ارزیابی‌تر است.','سؤال: کدام گزینه نمونه مشارکت مدنی است؟ الف) گزارش مستند مشکل محله ب) انتشار شایعه ج) تخریب اموال عمومی د) جعل سند. پاسخ: الف.','سؤال: برای فهم دقیق یک قانون، کدام متن اولویت دارد؟ الف) شایعه ب) متن رسمی و به‌روز ج) نظر ناشناس د) تیتر بدون منبع. پاسخ: ب.']},
+ {id:'history',title:'🏛 تاریخ ایران',source:'https://www.iranicaonline.org',prompt:'تاریخ ایران با روایت دقیق و بدون تاریخ و نقل‌قول ساختگی؛ فقط بر اساس موضوع داده‌شده.',cards:['نقش راه‌های تجاری در ارتباط شهرهای تاریخی ایران را بدون تاریخ‌گذاری ساختگی توضیح بده.','درباره اهمیت ثبت و نگهداری میراث مکتوب ایران بنویس.','چرا برای شناخت تاریخ ایران باید روایت‌های مختلف و منابع اولیه را با هم سنجید؟']},
+ {id:'leadership',title:'🧭 مدیریت و رهبری',source:'https://hbr.org',prompt:'یک مهارت کاربردی مدیریت با مثال فرضی و بدون ادعای علمی.',cards:['تفاوت سپردن مسئولیت با رهاکردن همکار بدون حمایت را با مثال نشان بده.','یک راه ساده برای شفاف‌کردن انتظارها در جلسه کاری بیان کن.','چرا ثبت تصمیم‌ها و مسئول پیگیری هر کار در جلسات مفید است؟']},
+ {id:'technology',title:'🤖 هوش مصنوعی و فناوری',source:'https://www.nist.gov/itl/ai-risk-management-framework',prompt:'یک نکته آموزشی دقیق درباره هوش مصنوعی و راستی‌آزمایی خروجی آن؛ بدون ادعای به‌روزِ بررسی‌نشده.',cards:['چرا خروجی هوش مصنوعی برای تصمیم مهم باید با منبع مستقل بررسی شود؟','اطلاعات شخصی را چرا نباید بدون ضرورت در ابزارهای عمومی هوش مصنوعی وارد کرد؟','تفاوت کاربرد ابزار هوش مصنوعی برای ایده‌پردازی با استفاده از آن به‌عنوان منبع قطعی چیست؟']},
+ {id:'poll',title:'📊 نظرسنجی و چالش',source:'https://telegram.org',prompt:'پرسش مشارکتی غیرسیاسی و بدون جهت‌دهی.',cards:['برای یادگرفتن یک موضوع جدید کدام را ترجیح می‌دهید؟ کتاب، ویدئو، تمرین عملی یا گفت‌وگو؟','در یک محله، کدام موضوع برای بررسی کارشناسی جذاب‌تر است؟ فضای سبز، حمل‌ونقل، پسماند یا خدمات دیجیتال؟','برای بررسی خبر، اولین قدم شما چیست؟ منبع، تاریخ، تصویر یا متن کامل؟']}
+];
+function specialSelection(time,slotIndex){const d=tehranClock(time);const ordinal=Math.floor(Date.parse(d.date+'T00:00:00Z')/86400000);return SPECIAL_CATEGORIES[(ordinal*3+slotIndex)%SPECIAL_CATEGORIES.length]}
+async function specialGemini(env,category,seed){
+ if(!env.GEMINI_API_KEY)return null;
+ const instruction='سردبیر آموزشی فارسی و بی‌طرف هستی. فقط یک متن آماده انتشار ۶۰ تا ۱۰۰ کلمه‌ای بنویس. بدون مقدمه، برچسب، هشتگ، توصیه به رأی دادن به اشخاص، ادعای خبری جدید، تاریخ، عدد یا ماده قانونی ساختگی. موضوع: '+category.title+'. چارچوب: '+category.prompt+' موضوع دقیق: '+seed+'. اگر نیاز به اطلاعات خارج از چارچوب داری، فقط همان مفهوم عمومی را توضیح بده.';
+ try{
+  const r=await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent',{method:'POST',headers:{'content-type':'application/json','x-goog-api-key':env.GEMINI_API_KEY},body:JSON.stringify({contents:[{parts:[{text:instruction}]}],generationConfig:{temperature:0.45,maxOutputTokens:340}}),signal:AbortSignal.timeout(8500)});
+  if(!r.ok)return null;
+  const j=await r.json();const s=j.candidates?.[0]?.content?.parts?.map(p=>p.text||'').join('').trim();
+  return s&&contentQuality(s,category.id)&&s.length<850?s:null;
+ }catch(e){console.warn('special gemini fallback',String(e));return null}
+}
+async function specialDigest(env){
+ const r=await env.NEWS_DB.prepare("SELECT title,url,source FROM articles WHERE status='published' AND created_at >= datetime('now','-1 day') ORDER BY created_at DESC LIMIT 5").all();
+ const rows=r.results||[];if(!rows.length)return null;
+ return 'مهم‌ترین خبرهای منتشرشده در ۲۴ ساعت گذشته:\n\n'+rows.map((x,i)=>(i+1)+'. '+fixEncoding(x.title)+'\n'+x.source+' | '+x.url).join('\n\n');
+}
+async function runSpecialContent(env,time){
+ if(env.PUBLISH_ENABLED!=='true'||!env.TELEGRAM_BOT_TOKEN||!env.NEWS_DB)return;
+ const local=tehranClock(time);const index=SPECIAL_SLOTS.indexOf(local.clock);if(index<0)return;
+ await env.NEWS_DB.prepare("CREATE TABLE IF NOT EXISTS daily_content (id TEXT PRIMARY KEY, kind TEXT NOT NULL, content TEXT NOT NULL, status TEXT NOT NULL, message_id INTEGER, error TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP, sent_at TEXT)").run();
+ const category=index===3?null:specialSelection(time,index);
+ const kind=index===3?'digest':category.id;
+ const id=local.date+':special:'+index;
+ const existing=await env.NEWS_DB.prepare('SELECT status FROM daily_content WHERE id=?').bind(id).first();if(existing)return;
+ let textContent,heading;
+ if(index===3){textContent=await specialDigest(env);heading='🗞 خلاصه اخبار روز';if(!textContent)return}
+ else{
+  const seed=category.cards[(local.day+index)%category.cards.length];
+  textContent=category.id==='quiz'||category.id==='poll'?seed:(await specialGemini(env,category,seed))||seed;
+  heading=category.title;
+ }
+ const fingerprint=normalizedHeadline(textContent);
+ const recent=await env.NEWS_DB.prepare("SELECT content FROM daily_content WHERE status='published' AND created_at >= datetime('now','-21 days') ORDER BY created_at DESC LIMIT 250").all();
+ if((recent.results||[]).some(x=>normalizedHeadline(x.content)===fingerprint||similarity(x.content,textContent)>0.88))return;
+ const claim=await env.NEWS_DB.prepare("INSERT OR IGNORE INTO daily_content(id,kind,content,status) VALUES(?,?,?,'sending')").bind(id,kind,textContent).run();if(!claim.meta?.changes)return;
+ const body=heading+'\n\n'+textContent+(index===3?'':'\n\n🔗 منبع برای مطالعه بیشتر: '+category.source);
+ try{
+  const r=await fetch('https://api.telegram.org/bot'+env.TELEGRAM_BOT_TOKEN+'/sendMessage',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({chat_id:'@candidatoryiran',text:body,link_preview_options:{is_disabled:true}}),signal:AbortSignal.timeout(10000)});
+  const j=await r.json();
+  await env.NEWS_DB.prepare("UPDATE daily_content SET status=?,message_id=?,error=?,sent_at=CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE NULL END WHERE id=?").bind(j.ok?'published':'failed',j.result?.message_id??null,j.ok?null:String(j.description||'telegram error'),j.ok?1:0,id).run();
+ }catch(e){await env.NEWS_DB.prepare("UPDATE daily_content SET status='failed',error=? WHERE id=?").bind(String(e),id).run()}
 }
