@@ -148,12 +148,46 @@ const CONTENT_PROMPTS={
 };
 const GENERIC_REJECT=/مناسبت‌های رسمی تنها|پس از بررسی در منابع معتبر|به جای نقل‌قول بدون منبع|پیشنهاد کوچک امروز|فرصتی تازه برای شناخت|به عنوان یک مدل زبان|هوش مصنوعی|در این بخش|متن پیشنهادی|پرامپت|تولید محتوا/i;
 function contentQuality(s,kind){return validDaily(s,kind)&&!GENERIC_REJECT.test(s)&&(!['night','evening'].includes(kind)||s.length<=340)}
+function persianDateParts(time){
+ const p=Object.fromEntries(new Intl.DateTimeFormat('en-US-u-ca-persian',{timeZone:'Asia/Tehran',year:'numeric',month:'numeric',day:'numeric'}).formatToParts(new Date(time)).map(x=>[x.type,x.value]));
+ return {year:Number(p.year),month:Number(p.month),day:Number(p.day)};
+}
+async function calendarEvents(time){
+ const {year,month,day}=persianDateParts(time);
+ const date=[year,String(month).padStart(2,'0'),String(day).padStart(2,'0')].join('-');
+ const sources=[
+  {name:'Persian Calendar',url:'https://www.persian-calendar.com/api/events?year='+year+'&month_sh='+month+'&day_sh='+day},
+  {name:'FarsiUI',url:'https://raw.githubusercontent.com/MiladJoodi/FarsiUI/main/calendar/years/'+year+'/events.json'}
+ ];
+ const collected=[];
+ for(const source of sources){
+  try{
+   const r=await fetch(source.url,{headers:{'Accept':'application/json','User-Agent':'CandidatoryCalendar/1.0'},signal:AbortSignal.timeout(5500)});
+   if(!r.ok)throw Error('HTTP '+r.status);
+   const json=await r.json();
+   const records=Array.isArray(json.data)?json.data:Array.isArray(json.items)?json.items:[];
+   for(const item of records){
+    const match=source.name==='Persian Calendar'?Number(item.year_sh)===year&&Number(item.month_sh)===month&&Number(item.day_sh)===day:String(item.date)===date;
+    const title=source.name==='Persian Calendar'?item.title_fa:item.title?.fa;
+    const category=String(item.category||'');
+    if(match&&typeof title==='string'&&title.trim().length>2&&title.length<110&&!/https?:|\\n|\\r/.test(title)&&!['fun','countries'].includes(category))collected.push({title:title.trim(),source:source.name,holiday:!!item.is_holiday});
+   }
+   console.log('calendar source',source.name,'records',records.length,'matched',collected.length);
+  }catch(e){console.warn('calendar source failed',source.name,String(e))}
+ }
+ const unique=new Map();
+ for(const event of collected){const key=event.title.normalize('NFKC').replace(/\\s+/g,' ').replace(/[ي]/g,'ی').replace(/[ك]/g,'ک');if(!unique.has(key))unique.set(key,event)}
+ return [...unique.values()].slice(0,5);
+}
 async function verifiedCalendar(time){
  const d=new Date(time);
  const solar=new Intl.DateTimeFormat('fa-IR-u-ca-persian',{timeZone:'Asia/Tehran',weekday:'long',day:'numeric',month:'long',year:'numeric'}).format(d);
  const greg=new Intl.DateTimeFormat('fa-IR-u-ca-gregory',{timeZone:'Asia/Tehran',day:'numeric',month:'long',year:'numeric'}).format(d);
  const islamic=new Intl.DateTimeFormat('fa-IR-u-ca-islamic-civil',{timeZone:'Asia/Tehran',day:'numeric',month:'long',year:'numeric'}).format(d);
- return 'امروز '+solar+' است.\\n\\n🗓 میلادی: '+greg+'\\n🌙 قمری (محاسباتی): '+islamic;
+ const events=await calendarEvents(time);
+ const lines=['📅 '+solar,'🗓 میلادی: '+greg,'🌙 قمری (محاسباتی): '+islamic];
+ if(events.length){lines.push('','📌 مناسبت‌های امروز:');for(const event of events)lines.push('• '+event.title+(event.holiday?' (تعطیل رسمی)':''))}
+ return lines.join('\\n');
 }
 function tehranClock(time){const parts=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Tehran',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).formatToParts(new Date(time));const p=Object.fromEntries(parts.map(x=>[x.type,x.value]));return {date:p.year+'-'+p.month+'-'+p.day,clock:p.hour+':'+p.minute,day:Number(p.day)}}
 function normalizeDaily(s){return String(s).normalize('NFKC').replace(/[ي]/g,'ی').replace(/[ك]/g,'ک').replace(/\s+/g,' ').trim()}
