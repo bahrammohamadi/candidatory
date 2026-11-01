@@ -273,7 +273,7 @@ async function specialGemini(env,category,seed){
 async function specialDigest(env){
  const r=await env.NEWS_DB.prepare("SELECT title,url,source FROM articles WHERE status='published' AND created_at >= datetime('now','-1 day') ORDER BY created_at DESC LIMIT 18").all();
  const rows=[];for(const x of r.results||[]){
-  if(!x.url||!/^https?:\\/\\//.test(x.url))continue;
+  if(!x.url||!String(x.url).startsWith('https://')&&!String(x.url).startsWith('http://'))continue;
   if(rows.some(y=>canonicalNewsUrl(y.url)===canonicalNewsUrl(x.url)||normalizedHeadline(y.title)===normalizedHeadline(x.title)||similarity(y.title,x.title)>=0.68))continue;
   rows.push(x);if(rows.length===5)break;
  }
