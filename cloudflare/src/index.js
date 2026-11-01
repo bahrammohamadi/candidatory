@@ -271,9 +271,19 @@ async function specialGemini(env,category,seed){
  }catch(e){console.warn('special gemini fallback',String(e));return null}
 }
 async function specialDigest(env){
- const r=await env.NEWS_DB.prepare("SELECT title,url,source FROM articles WHERE status='published' AND created_at >= datetime('now','-1 day') ORDER BY created_at DESC LIMIT 5").all();
- const rows=r.results||[];if(!rows.length)return null;
- return 'مهم‌ترین خبرهای منتشرشده در ۲۴ ساعت گذشته:\n\n'+rows.map((x,i)=>(i+1)+'. '+fixEncoding(x.title)+'\n'+x.source+' | '+x.url).join('\n\n');
+ const r=await env.NEWS_DB.prepare("SELECT title,url,source FROM articles WHERE status='published' AND created_at >= datetime('now','-1 day') ORDER BY created_at DESC LIMIT 18").all();
+ const rows=[];for(const x of r.results||[]){
+  if(!x.url||!/^https?:\\/\\//.test(x.url))continue;
+  if(rows.some(y=>canonicalNewsUrl(y.url)===canonicalNewsUrl(x.url)||normalizedHeadline(y.title)===normalizedHeadline(x.title)||similarity(y.title,x.title)>=0.68))continue;
+  rows.push(x);if(rows.length===5)break;
+ }
+ if(!rows.length)return null;
+ const names={ISNA:'ایسنا',Mehr:'مهر',BBCPersian:'بی‌بی‌سی فارسی'};
+ return 'مرور خبرهای منتشرشده در ۲۴ ساعت گذشته:\\n\\n'+rows.map((x,i)=>{
+  const title=fixEncoding(x.title).trim().slice(0,180);
+  const source=names[x.source]||x.source;
+  return (i+1)+'. '+title+'\\n📰 '+source+' | <a href="'+escapeHtml(x.url)+'">منبع خبر</a>';
+ }).join('\\n\\n');
 }
 const COMMONS_IMAGE_TERMS={urban:'urban planning city park',history:'Persian architecture historical monument',leadership:'team meeting office',technology:'computer artificial intelligence technology',civic:'public library civic building',verify:'newspapers journalism fact checking'};
 async function commonsLicensedPhoto(kind){
@@ -320,7 +330,7 @@ async function runSpecialContent(env,time){
   const usePhoto=!!photo&&caption.length<=950;
   let r=await fetch('https://api.telegram.org/bot'+env.TELEGRAM_BOT_TOKEN+'/'+(usePhoto?'sendPhoto':'sendMessage'),{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(usePhoto?{chat_id:'@candidatoryiran',photo:photo.url,caption}:{chat_id:'@candidatoryiran',text:body,link_preview_options:{is_disabled:true}}),signal:AbortSignal.timeout(10000)});
   let j=await r.json();
-  if(usePhoto&&!j.ok){r=await fetch('https://api.telegram.org/bot'+env.TELEGRAM_BOT_TOKEN+'/sendMessage',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({chat_id:'@candidatoryiran',text:body,link_preview_options:{is_disabled:true}}),signal:AbortSignal.timeout(10000)});j=await r.json()}
+  if(usePhoto&&!j.ok){r=await fetch('https://api.telegram.org/bot'+env.TELEGRAM_BOT_TOKEN+'/sendMessage',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({chat_id:'@candidatoryiran',text:body,parse_mode:index===3?'HTML':undefined,link_preview_options:{is_disabled:true}}),signal:AbortSignal.timeout(10000)});j=await r.json()}
   await env.NEWS_DB.prepare("UPDATE daily_content SET status=?,message_id=?,error=?,sent_at=CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE NULL END WHERE id=?").bind(j.ok?'published':'failed',j.result?.message_id??null,j.ok?null:String(j.description||'telegram error'),j.ok?1:0,id).run();
  }catch(e){await env.NEWS_DB.prepare("UPDATE daily_content SET status='failed',error=? WHERE id=?").bind(String(e),id).run()}
 }
