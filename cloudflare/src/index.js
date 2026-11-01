@@ -47,6 +47,8 @@ function cleanSummary(s){return fixEncoding(String(s||'').replace(/<[^>]*>/g,' '
 async function publishOne(env){
  const row=await env.NEWS_DB.prepare("SELECT id,title,url,source FROM articles WHERE status='pending_review' ORDER BY created_at ASC LIMIT 1").first();
  if(!row)return;
+ const claimed=await env.NEWS_DB.prepare("UPDATE articles SET status='sending' WHERE id=? AND status='pending_review'").bind(row.id).run();
+ if(!claimed.meta?.changes)return;
  const previous=await env.NEWS_DB.prepare("SELECT title,url FROM articles WHERE status='published' AND created_at >= datetime('now','-7 days') ORDER BY created_at DESC LIMIT 400").all();
  if((previous.results||[]).some(x=>canonicalNewsUrl(x.url)===canonicalNewsUrl(row.url)||normalizedHeadline(x.title)===normalizedHeadline(row.title)||similarity(x.title,row.title)>=0.82)){await env.NEWS_DB.prepare("UPDATE articles SET status='duplicate' WHERE id=?").bind(row.id).run();return}
  let link;try{const u=new URL(row.url);if(!['http:','https:'].includes(u.protocol))throw Error('invalid protocol');link=u.href}catch{return}
