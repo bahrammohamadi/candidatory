@@ -55,6 +55,11 @@ async function publishOne(env){
   const r=await fetch(link,{signal:AbortSignal.timeout(5000),headers:{'user-agent':'Mozilla/5.0 (compatible; CandidatoryNewsBot/1.0)'}});
   if(r.ok){const html=(await r.text()).slice(0,250000);summary=cleanSummary(getMeta(html,'og:description')||getMeta(html,'description'));photo=getMeta(html,'og:image');if(photo)photo=new URL(photo,link).href}
  }catch(e){console.warn('Article metadata unavailable',row.source,String(e))}
+ if(!summary||summary.length<75||normalizedHeadline(summary)===normalizedHeadline(row.title)){
+  console.warn('News skipped: insufficient verified article description',row.id,row.source);
+  await env.NEWS_DB.prepare("UPDATE articles SET status='insufficient_content' WHERE id=?").bind(row.id).run();
+  return;
+ }
  const title=escapeHtml(fixEncoding(row.title));
  const source=escapeHtml(row.source);
  const separator='━━━━━━━━━━━━━━';
