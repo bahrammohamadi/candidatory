@@ -79,6 +79,24 @@ async function publishOne(env){
   if(!data?.ok){if(data)console.warn('Photo send failed; text fallback',data.description);data=await send('sendMessage',{...base,text})}
   if(!data.ok){console.error('Telegram publish failed',data.error_code,data.description);await env.NEWS_DB.prepare("UPDATE articles SET status='pending_review' WHERE id=? AND status='sending'").bind(row.id).run();return}
   await env.NEWS_DB.prepare("UPDATE articles SET status='published' WHERE id=?").bind(row.id).run();
+  try{
+   if(env.BALE_BOT_TOKEN){
+    await env.NEWS_DB.prepare("CREATE TABLE IF NOT EXISTS bale_deliveries (article_id TEXT PRIMARY KEY, status TEXT NOT NULL, message_id TEXT, last_error TEXT, updated_at TEXT DEFAULT CURRENT_TIMESTAMP)").run();
+    const old=await env.NEWS_DB.prepare("SELECT status FROM bale_deliveries WHERE article_id=?").bind(row.id).first();
+    if(old?.status!=='sent'){
+     const baleText='💠 '+fixEncoding(row.title)+'\\n\\n'+summary+'\\n\\n📰 '+row.source+'\\n🔗 منبع: '+link+'\\n\\n🇮🇷 کانال خبری کاندیداتوری\\n@candidatoryiran';
+     async function baleSend(method,payload){
+      const res=await fetch('https://tapi.bale.ai/bot'+env.BALE_BOT_TOKEN+'/'+method,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(payload),signal:AbortSignal.timeout(9000)});
+      return res.json();
+     }
+     let result;
+     if(photo&&photo.startsWith('https://')&&baleText.length<950)result=await baleSend('sendPhoto',{chat_id:env.BALE_CHANNEL_ID||'@candidatoryiran',photo,caption:baleText});
+     if(!result?.ok)result=await baleSend('sendMessage',{chat_id:env.BALE_CHANNEL_ID||'@candidatoryiran',text:baleText.slice(0,3900)});
+     await env.NEWS_DB.prepare("INSERT INTO bale_deliveries (article_id,status,message_id,last_error,updated_at) VALUES (?,?,?,?,CURRENT_TIMESTAMP) ON CONFLICT(article_id) DO UPDATE SET status=excluded.status,message_id=excluded.message_id,last_error=excluded.last_error,updated_at=CURRENT_TIMESTAMP").bind(row.id,result?.ok?'sent':'failed',String(result?.result?.message_id||''),result?.ok?'':String(result?.description||'Unknown error').slice(0,200)).run();
+     console.log('Bale news delivery',row.id,result?.ok?'sent':'failed');
+    }
+   }
+  }catch(baleError){console.warn('Bale delivery error',row.id,String(baleError))}
   console.log('Published news',row.id,data.result?.message_id,photo?'photo-attempted':'text')
  }catch(e){console.error('Telegram publish exception',String(e));await env.NEWS_DB.prepare("UPDATE articles SET status='pending_review' WHERE id=? AND status='sending'").bind(row.id).run()}
 }
