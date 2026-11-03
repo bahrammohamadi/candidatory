@@ -17,18 +17,19 @@ from urllib.request import Request, urlopen
 from instagram_branding import render_pair
 
 FONT_URL = "https://raw.githubusercontent.com/google/fonts/main/ofl/vazirmatn/Vazirmatn%5Bwght%5D.ttf"
+HEADLINE_FONT_URL = "https://raw.githubusercontent.com/google/fonts/main/ofl/estedad/Estedad%5Bwght%5D.ttf"
 MAX_FONT_BYTES = 3_000_000
 
 
-def resolve_font(path: str | None) -> str:
+def resolve_font(path: str | None, *, headline: bool=False) -> str:
     if path:
         if not Path(path).is_file():
             raise FileNotFoundError(path)
         return path
-    target = Path(tempfile.gettempdir()) / "candidatory-vazirmatn-variable.ttf"
+    target = Path(tempfile.gettempdir()) / ("candidatory-estedad-variable.ttf" if headline else "candidatory-vazirmatn-variable.ttf")
     if target.is_file() and target.stat().st_size > 10000:
         return str(target)
-    req = Request(FONT_URL, headers={"User-Agent": "CandidatoryEditorialRenderer/1.0"})
+    req = Request(HEADLINE_FONT_URL if headline else FONT_URL, headers={"User-Agent": "CandidatoryEditorialRenderer/1.0"})
     with urlopen(req, timeout=15) as stream:
         data = stream.read(MAX_FONT_BYTES + 1)
     if not (10_000 < len(data) < MAX_FONT_BYTES):
@@ -45,7 +46,8 @@ def main(argv=None):
     p.add_argument("--source", required=True)
     p.add_argument("--category", default="خبر منتخب")
     p.add_argument("--summary", default=None)
-    p.add_argument("--font")
+    p.add_argument("--font", help="Optional licensed body typeface; defaults to Vazirmatn")
+    p.add_argument("--headline-font", help="Optional licensed news headline typeface; defaults to Estedad")
     p.add_argument("--output-dir", required=True)
     args=p.parse_args(argv)
     if not args.rights_confirmed:
@@ -53,7 +55,7 @@ def main(argv=None):
     source=Path(args.photo)
     if not source.is_file() or source.stat().st_size > 15_000_000:
         raise SystemExit("Missing or oversized licensed image")
-    feed,story=render_pair(source.read_bytes(),args.headline,args.category,args.source,resolve_font(args.font),summary=args.summary)
+    feed,story=render_pair(source.read_bytes(),args.headline,args.category,args.source,resolve_font(args.font),summary=args.summary,headline_font_path=resolve_font(args.headline_font,headline=True))
     output=Path(args.output_dir);output.mkdir(parents=True,exist_ok=True)
     (output/"feed.jpg").write_bytes(feed)
     (output/"story.jpg").write_bytes(story)
