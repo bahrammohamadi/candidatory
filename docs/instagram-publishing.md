@@ -1,3 +1,18 @@
+## Cloudflare standalone scheduler — actual status (2026-11-03)
+The autonomous Cloudflare Worker is `candidatory-instagram-staging`, scheduled **every 30 minutes** via `*/30 * * * *` (UTC cron). Its canonical deploy config is `wrangler.instagram.toml` and source is `cloudflare-instagram-sidecar.mjs`.
+It now **really performs**: read-only Telegram public-channel sync (not bot polling), D1 metadata reconciliation, strict headline-first news classification into v8 category IDs, D1 idempotent queueing, and append-only `instagram_scheduler_runs` audit. A real cron execution at **2026-11-03 17:30:46 UTC** fetched 20 items and added 4 candidates without any open ChatGPT session. Three initially queued items (4011, 4012, 4021) were held for editorial review because their main topic was not genuinely electoral.
+The public, non-mutating status view is `https://candidatory-instagram-staging.lasvaram-candidatory.workers.dev/queue/status`, including most recent cron run and queue counts.
+
+**Standalone Instagram feed/story publishing is NOT activated.** This Worker intentionally exposes `auto_publish:false`; no external Instagram server credential or durable licensed-font image renderer is bound. The ChatGPT Composio connection has not been exported to Cloudflare. Existing ChatGPT publication automation is also **disabled**; never describe the combined pipeline as completely unattended until both missing gates pass a published end-to-end test.
+
+Remaining secure onboarding (do not expose any secrets in source code/chat):
+1. Choose either (a) a scoped Composio project API key with actual access to the **Candidatory** Instagram connected account, or (b) an appropriately scoped Meta Instagram Graph API long-lived token for the business account. Add to the Cloudflare Worker as encrypted Secrets, not plaintext variables. The chat connector alone does not provide a server token.
+2. Deploy a durable, approved renderer capable of the exact Python v8 `B Titr Bold`/Vazirmatn imagery with the user's official logo and all three category seals, and host the output JPEG at a stable HTTPS URL accepted by Instagram. Keep copyrighted font files private. Verify image rights and visual quality.
+3. Add a publisher module with persistent idempotency: store container IDs separately from final media IDs; confirm feed before story; on any ambiguous error, query Instagram before retrying; honor daily caps, queue state, and old publications. Never publish an unverified article, unsupported image, or missing-font fallback.
+4. Make one real scheduled publish, check Instagram and D1, and only then enable unattended publication.
+
+Related repository sources: `config/instagram-news-categories.json`, `config/instagram-brand-typography.json`, `instagram_branding.py`, and `tests/instagram_schedule_queue.test.mjs`.
+
 # Candidatory Instagram — operation & safety (2026-11-03)
 
 ## Verified external accounts
