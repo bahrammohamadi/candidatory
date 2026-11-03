@@ -62,8 +62,8 @@ def _base(source: Image.Image, size: tuple[int, int], is_story: bool):
     No generic ballot-box fallback: caller must provide a verified image.
     """
     width, height = size
-    picture_top = 285 if is_story else 185
-    picture_bottom = 1030 if is_story else 840
+    picture_top = 375 if is_story else 185
+    picture_bottom = 1060 if is_story else 840
     canvas = Image.new("RGB", size, NAVY)
     draw = ImageDraw.Draw(canvas)
     draw.polygon(((0, 0), (160, 0), (0, 240)), fill=RED)
@@ -84,10 +84,14 @@ def render(source: Image.Image, headline: str, category: str, source_name: str, 
     label_font = _font(font_path, 32)
     title_font = _font(font_path, 55 if story else 61)
     small_font = _font(font_path, 27)
-    # Simple prominent header, deliberately clear of Instagram story controls.
-    header_y = 170 if story else 40
-    _right(draw, w - 60, header_y, BRAND, brand_font, WHITE)
-    draw.text((46, header_y + 70), HANDLE, font=small_font, fill=LIGHT)
+    # Clear cream banner below story controls, with brand mark at a fixed position.
+    banner_top = 230 if story else 22
+    banner_bottom = 355 if story else 160
+    draw.rounded_rectangle((35, banner_top, w - 35, banner_bottom), radius=28, fill=WHITE)
+    draw.rounded_rectangle((55, banner_top + 26, 147, banner_top + 106), radius=16, outline=RED, width=7)
+    draw.line(((72, banner_top + 68), (92, banner_top + 86), (129, banner_top + 43)), fill=RED, width=9)
+    _right(draw, w - 65, banner_top + 30, BRAND, brand_font, NAVY)
+    draw.text((46, banner_bottom + 14), HANDLE, font=small_font, fill=LIGHT)
     label = category.strip() or "خبر منتخب"
     draw.rounded_rectangle((w - 378, lower - 54, w - 50, lower + 15), radius=18, fill=RED)
     _right(draw, w - 72, lower - 42, label, label_font, WHITE)
@@ -98,10 +102,10 @@ def render(source: Image.Image, headline: str, category: str, source_name: str, 
         y += 93 if story else 88
     # Always show attribution and a clear editorial footer.
     if story:
-        _right(draw, w - 68, 1515, "منبع: " + source_name, small_font, LIGHT)
-        draw.rounded_rectangle((78, 1623, w - 78, 1712), radius=25, fill=RED)
-        _right(draw, w - 126, 1642, "خبر کامل در آخرین پست", label_font, WHITE)
-        # The final 200px remain free for Instagram's story reply controls.
+        _right(draw, w - 68, 1470, "منبع: " + source_name, small_font, LIGHT)
+        draw.rounded_rectangle((78, 1540, w - 78, 1635), radius=25, fill=RED)
+        _right(draw, w - 126, 1560, "خبر کامل در آخرین پست", label_font, WHITE)
+        # The final 285px stay clear for Instagram's reply controls.
     else:
         _right(draw, w - 65, h - 115, "منبع: " + source_name, small_font, LIGHT)
         draw.line((40, h - 67, w - 40, h - 67), fill=RED, width=4)
