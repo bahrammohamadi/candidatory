@@ -1,6 +1,6 @@
 {
-  "version": 8,
-  "template": "candidatory-editorial-v8-category-seals",
+  "version": 9,
+  "template": "candidatory-editorial-v9-all-news",
   "categories": [
     {
       "id": "breaking",
@@ -19,11 +19,18 @@
       "label": "آموزشی / تحلیلی",
       "color": "#F39C12",
       "description": "Explanatory, background and analysis; not misrepresented as breaking"
+    },
+    {
+      "id": "general",
+      "label": "خبر روز",
+      "color": "#20A39E",
+      "description": "Sourced general news including economy, society, culture, science, sports and international affairs"
     }
   ],
   "logo_asset": "assets/candidatory-profile-logo.jpg.b64",
   "logo_source": "user-supplied image",
   "headline_font": "B Titr Bold",
   "body_font": "Vazirmatn",
-  "require_visual_review": true
+  "require_visual_review": true,
+  "selection_scope": "all_verified_telegram_news"
 }
