@@ -9,7 +9,7 @@ const MAX_CANDIDATES = 12;
 const RELEVANT = /انتخابات|انتخاباتی|شورا|رأی|رای|شهرداری|مدیریت شهری|حقوق شهروندی|election|council|ballot/i;
 const NON_CIVIC = /فوتبال|ورزش|مد|رمزارز/i;
 export async function ensureSchema(db) {
-  await db.prepare(`CREATE TABLE IF NOT EXISTS instagram_jobs (
+  await db.prepare(`CREATE TABLE IF NOT EXISTS instagram_intake_jobs (
     article_id TEXT PRIMARY KEY,
     title TEXT NOT NULL, source TEXT NOT NULL, source_url TEXT NOT NULL,
     published_at TEXT, source_image_url TEXT,
@@ -37,7 +37,7 @@ export async function intake(db, { cap = 4 } = {}) {
     const normalized = new URL(item.url).origin + new URL(item.url).pathname.replace(/\/$/,"");
     if (seen.has(normalized)) continue;
     seen.add(normalized);
-    const q=await db.prepare(`INSERT OR IGNORE INTO instagram_jobs
+    const q=await db.prepare(`INSERT OR IGNORE INTO instagram_intake_jobs
        (article_id,title,source,source_url,published_at) VALUES (?,?,?,?,?)`)
        .bind(item.id,item.title,item.source,item.url,item.published_at).run();
     if (q.meta?.changes) added++;
@@ -56,7 +56,7 @@ export default {
     });
     if (u.pathname === "/queue/status") {
       if (!env.NEWS_DB) return Response.json({error:"missing database"},{status:503});
-      const all=await env.NEWS_DB.prepare("SELECT status,COUNT(*) AS count FROM instagram_jobs GROUP BY status").all().catch(()=>({results:[]}));
+      const all=await env.NEWS_DB.prepare("SELECT status,COUNT(*) AS count FROM instagram_intake_jobs GROUP BY status").all().catch(()=>({results:[]}));
       return Response.json({auto_publish:false,statuses:all.results});
     }
     return new Response("Not Found", {status:404});
