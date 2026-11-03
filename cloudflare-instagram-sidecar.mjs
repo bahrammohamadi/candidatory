@@ -114,7 +114,10 @@ export default {
       auto_publish: false,
       reason: "requires approved renderer, media hosting and server-side Composio authorization"
     });
-    if (u.pathname === "/channel/probe") {\n      try { const r=await fetch(PUBLIC_CHANNEL,{cf:{cacheTtl:300,cacheEverything:true}});const p=parseTelegramPublicFeed(await r.text());return Response.json({http:r.status,messages:p.length,latest:p[0]?.telegram_message_id||null}); } catch(e){return Response.json({error:String(e).slice(0,100)},{status:502});}\n    }\n    if (u.pathname === "/queue/status") {
+    if (u.pathname === "/channel/probe") {
+      try { const r=await fetch(PUBLIC_CHANNEL,{cf:{cacheTtl:300,cacheEverything:true}});const p=parseTelegramPublicFeed(await r.text());return Response.json({http:r.status,messages:p.length,latest:p[0]?.telegram_message_id||null}); } catch(e){return Response.json({error:String(e).slice(0,100)},{status:502});}
+    }
+    if (u.pathname === "/queue/status") {
       if (!env.NEWS_DB) return Response.json({error:"missing database"},{status:503});
       const all=await env.NEWS_DB.prepare("SELECT status,COUNT(*) AS count FROM instagram_intake_jobs GROUP BY status").all().catch(()=>({results:[]}));
       return Response.json({auto_publish:false,statuses:all.results});
