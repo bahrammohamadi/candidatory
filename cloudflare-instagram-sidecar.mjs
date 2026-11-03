@@ -45,6 +45,66 @@ export async function intake(db, { cap = 4 } = {}) {
   }
   return { inspected: news.length, added };
 }
+
+/** Read-only Telegram public channel discovery, avoids Bot API polling/webhook conflicts. */
+const PUBLIC_CHANNEL = "https://t.me/s/candidatoryiran";
+function unescapeHtml(s) {
+  return String(s||"").replace(/&amp;/g,"&").replace(/&quot;/g,'"')
+    .replace(/&#39;/g,"'").replace(/&lt;/g,"<").replace(/&gt;/g,">")
+    .replace(/&#(\d+);/g,(_,n)=>String.fromCodePoint(Number(n)));
+}
+function stripMarkup(s) {
+  return unescapeHtml(String(s||"").replace(/<br\s*\/?\s*>/gi,"\n")
+    .replace(/<[^>]*>/g," ").replace(/\s+/g," ").trim());
+}
+export function parseTelegramPublicFeed(html) {
+  const blocks=String(html||"").split(/<div\s+class=["']tgme_widget_message_wrap/).slice(1);
+  const posts=[];
+  for(const chunk of blocks){
+    const id=chunk.match(/data-post=["']candidatoryiran\/(\d+)["']/i)?.[1];
+    if(!id)continue;
+    const textMatch=chunk.match(/<div\s+class=["'][^"']*tgme_widget_message_text[^"']*["'][^>]*>([\s\S]*?)<\/div>/i);
+    const photo=chunk.match(/background-image:\s*url\(['"]?(\/\/|https?:\/\/)[^)'"]+['"]?\)/i)?.[0];
+    const photoUrl=photo?.match(/url\(['"]?([^'")]+)/i)?.[1]||"";
+    const time=chunk.match(/datetime=["']([^"']+)["']/i)?.[1]||null;
+    const content=stripMarkup(textMatch?.[1]||"");
+    if(!content)continue;
+    const normalizedPhoto=photoUrl.startsWith("//")?"https:"+photoUrl:photoUrl;
+    posts.push({telegram_message_id:Number(id),caption:content.slice(0,3500),
+      photo_url:normalizedPhoto.startsWith("https://")?normalizedPhoto:null,
+      telegram_url:"https://t.me/candidatoryiran/"+id,posted_at:time});
+  }
+  return posts.sort((a,b)=>b.telegram_message_id-a.telegram_message_id);
+}
+export async function ensureTelegramTable(db){
+  await db.prepare(`CREATE TABLE IF NOT EXISTS instagram_telegram_posts (
+    telegram_message_id INTEGER PRIMARY KEY,
+    telegram_url TEXT NOT NULL,
+    caption TEXT NOT NULL,
+    photo_url TEXT,
+    posted_at TEXT,
+    status TEXT NOT NULL DEFAULT 'discovered',
+    feed_media_id TEXT,story_media_id TEXT,last_error TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`).run();
+}
+export async function syncTelegramChannel(db, fetchImpl=fetch){
+  const response=await fetchImpl(PUBLIC_CHANNEL,{headers:{"User-Agent":"Mozilla/5.0 (CandidatoryNewsBridge/1.0)"},cf:{cacheTtl:300,cacheEverything:true}});
+  if(!response.ok)throw new Error("Telegram public channel HTTP "+response.status);
+  const parsed=parseTelegramPublicFeed(await response.text());
+  if(!parsed.length)throw new Error("Telegram page contained no readable messages");
+  await ensureTelegramTable(db);
+  let added=0;
+  for(const item of parsed){
+    const x=await db.prepare(`INSERT OR IGNORE INTO instagram_telegram_posts
+      (telegram_message_id,telegram_url,caption,photo_url,posted_at)
+      VALUES (?,?,?,?,?)`).bind(item.telegram_message_id,item.telegram_url,item.caption,
+       item.photo_url,item.posted_at).run();
+    if(x.meta?.changes)added++;
+  }
+  return {seen:parsed.length,added,latest:parsed[0].telegram_message_id};
+}
+
 export default {
   async fetch(request, env) {
     const u = new URL(request.url);
@@ -54,6 +114,9 @@ export default {
       auto_publish: false,
       reason: "requires approved renderer, media hosting and server-side Composio authorization"
     });
+    if (u.pathname === "/channel/probe") {
+      try { const r=await fetch(PUBLIC_CHANNEL,{cf:{cacheTtl:300,cacheEverything:true}});const p=parseTelegramPublicFeed(await r.text());return Response.json({http:r.status,messages:p.length,latest:p[0]?.telegram_message_id||null}); } catch(e){return Response.json({error:String(e).slice(0,100)},{status:502});}
+    }
     if (u.pathname === "/queue/status") {
       if (!env.NEWS_DB) return Response.json({error:"missing database"},{status:503});
       const all=await env.NEWS_DB.prepare("SELECT status,COUNT(*) AS count FROM instagram_intake_jobs GROUP BY status").all().catch(()=>({results:[]}));
