@@ -12,6 +12,10 @@
 - **Scheduled ChatGPT automation** `انتشار منتخب اخبار کاندیداتوری`: hourly selected-news verification and conditional publication using connected Composio Instagram account. It may skip publication when rights, photo, source, template, or app access fails. This is not a standalone Cloudflare -> Composio deployment.
 - Staging `/queue/status` is read-only. Staging Worker returns `auto_publish:false`; this is intentional.
 
+
+## Direct channel extraction upgrade
+The Cloudflare staging Worker now also reads the **public Telegram channel HTML** at `https://t.me/s/candidatoryiran` every 30 minutes. This avoids conflicts with the active bot's webhook and captures newly published messages, their Telegram message IDs, captions and image URLs even when the older `articles` database is incomplete. It stores these in a separate table, `instagram_telegram_posts` (initial state `discovered`), which the scheduled ChatGPT publisher checks first. The first five messages (4012–4016) were ingested and the Worker probe confirmed 20 readable messages, latest ID 4016. This is a read-only news intake, not proof of unattended Instagram publication.
+
 ## Fixed branding code
 - `instagram_branding.py`: two JPEG outputs 1080x1350 and 1080x1920, with fixed navy/red/cream composition and safe areas.
 - `render_instagram_news.py`: CLI wrapper; **requires licensed/authorized photograph** and explicit `--rights-confirmed`. Downloads open-license Vazirmatn into a temporary private font cache.
