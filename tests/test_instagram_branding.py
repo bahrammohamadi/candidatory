@@ -63,6 +63,19 @@ class BrandingTests(unittest.TestCase):
         # Safe lower strip is not filled with a giant CTA behind reply controls.
         self.assertTrue(all(abs(a-b) <= 3 for a,b in zip(story.getpixel((500, 1850)), (16, 35, 74))))
 
+    def test_stale_oversized_story_summary_rejected(self):
+        import os
+        font = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+        if not os.path.exists(font):
+            self.skipTest("No system font")
+        with self.assertRaises(ValueError):
+            render_pair(
+                self.source.getvalue(),
+                "اعلام آخرین نتایج برنامه‌ریزی مسابقات ملی و مرحله استانی دانشجویان",
+                "خبر آموزشی", "ایسنا", font,
+                summary="خلاصه بسیار بلند و نامناسب برای طراحی استوری " * 12,
+            )
+
     def test_persian_is_not_double_reversed(self):
         # Critical regression: Pillow/libraqm owns RTL shaping and bidi reordering.
         self.assertEqual(rtl("کاندیداتوری"), "کاندیداتوری")
