@@ -116,10 +116,18 @@ export const INSTAGRAM_CATEGORY_COLORS=Object.freeze({
   breaking:"#E31336",election:"#1E63E9",analysis:"#F39C12"
 });
 export function classifyForInstagram(caption) {
-  const s=String(caption||"").slice(0,400);
-  if(/(?:^|\s)(?:خبر فوری|فوری|BREAKING)(?:\s|:|؛|$)/i.test(s)) return "breaking";
-  if(/گزارش تحلیلی|راهنمای|چگونه|چطور|پیامدها|چه پیامدهایی|جریمندرینگ|راستی\s*آزمایی|تحلیل|توضیحی|what if/i.test(s)) return "analysis";
-  if(/انتخابات|رأی\s*گیری|رای\s*گیری|نامزد|کنگره|شورای شهر|شورا|electoral|election/i.test(s)) return "election";
+  const s=String(caption||"").slice(0,700);
+  // Classify by editorial headline, not hashtags or later incidental mentions.
+  const first=s.split(/#|@candidatoryiran|📰/)[0].replace(/^[^\p{L}\p{N}]*/u,"").trim();
+  const title=first.slice(0,145);
+  if(!title)return null;
+  if(/^(?:خبر فوری|فوری|BREAKING)(?:[:：\s]|$)/i.test(title))return "breaking";
+  if(/^(?:قیمت|سوخت|بنزین|نفت|ارز|هدف مذاکرات|ادعاهای اخیر درباره|قیمت بالای)/.test(title))
+    return null;
+  if(/جریمندرینگ|گزارش تحلیلی|راهنمای|چگونه|چطور|پیامدها|چه پیامدهایی|راستی\s*آزمایی|تحلیل|توضیحی|چه می‌شود|what if/i.test(title))
+    return "analysis";
+  if(/انتخابات|رأی\s*گیری|رای\s*گیری|نامزد|مجلس نمایندگان|کنگره|شورای شهر|انتخاباتی|electoral|election/i.test(title))
+    return "election";
   return null;
 }
 export async function ensurePublishingQueue(db) {
