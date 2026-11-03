@@ -6,8 +6,6 @@
 const CHANNEL = "@candidatoryiran";
 const IG = "@candidatory.ir";
 const MAX_CANDIDATES = 12;
-const RELEVANT = /انتخابات|انتخاباتی|شورا|رأی|رای|شهرداری|مدیریت شهری|حقوق شهروندی|election|council|ballot/i;
-const NON_CIVIC = /فوتبال|ورزش|مد|رمزارز/i;
 export async function ensureSchema(db) {
   await db.prepare(`CREATE TABLE IF NOT EXISTS instagram_intake_jobs (
     article_id TEXT PRIMARY KEY,
@@ -23,8 +21,7 @@ export async function ensureSchema(db) {
 }
 function sortEligible(items) {
   return items.filter(i =>
-    i.status === "published" && i.id && i.title && i.source && /^https:\/\//.test(i.url || "") &&
-    RELEVANT.test(i.title) && !NON_CIVIC.test(i.title)
+    i.status === "published" && i.id && i.title && i.source && /^https:\/\//.test(i.url || "")
   ).sort((a,b) => String(b.created_at).localeCompare(String(a.created_at)));
 }
 export async function intake(db, { cap = 4 } = {}) {
@@ -109,27 +106,27 @@ export async function syncTelegramChannel(db, fetchImpl=fetch){
 }
 
 /** Server-side selection/queue. No ChatGPT presence is needed for these steps.
- * Publication is deliberately independent and disabled until private renderer
+ * Candidate topics are unrestricted: politics, economy, culture, social issues, science, sport and more.\n * Publication is deliberately independent and disabled until private renderer
  * and Instagram/Composio server credentials are installed and verified.
  */
 export const INSTAGRAM_CATEGORY_COLORS=Object.freeze({
-  breaking:"#E31336",election:"#1E63E9",analysis:"#F39C12"
+  breaking:"#E31336",election:"#1E63E9",analysis:"#F39C12",general:"#20A39E"
 });
 export function classifyForInstagram(caption) {
   const s=String(caption||"").slice(0,700);
-  // Classify by editorial headline, not hashtags or later incidental mentions.
   const first=s.split(/#|@candidatoryiran|📰/)[0].replace(/^[^\p{L}\p{N}]*/u,"").trim();
   const title=first.slice(0,145);
   if(!title)return null;
+  // Only explicitly marked, sourced breaking reports receive the urgent red seal.
   if(/^(?:خبر فوری|فوری|BREAKING)(?:[:：\s]|$)/i.test(title))return "breaking";
-  if(/^(?:قیمت|سوخت|بنزین|نفت|ارز|هدف مذاکرات|ادعاهای اخیر درباره|قیمت بالای)/.test(title))
-    return null;
   if(/جریمندرینگ|گزارش تحلیلی|راهنمای|چگونه|چطور|پیامدها|چه پیامدهایی|راستی\s*آزمایی|تحلیل|توضیحی|چه می‌شود|what if/i.test(title))
     return "analysis";
   if(/انتخابات|رأی\s*گیری|رای\s*گیری|نامزد|مجلس نمایندگان|کنگره|شورای شهر|انتخاباتی|electoral|election/i.test(title))
     return "election";
-  return null;
+  // Any other properly sourced news may be considered; topic does NOT block Instagram.
+  return "general";
 }
+
 export async function ensurePublishingQueue(db) {
   await db.prepare(`CREATE TABLE IF NOT EXISTS instagram_scheduled_queue (
     telegram_message_id INTEGER PRIMARY KEY,
@@ -137,7 +134,7 @@ export async function ensurePublishingQueue(db) {
     source_url TEXT NOT NULL,
     source_image_url TEXT NOT NULL,
     headline TEXT NOT NULL,
-    template_id TEXT NOT NULL DEFAULT 'candidatory-editorial-v8-category-seals',
+    template_id TEXT NOT NULL DEFAULT 'candidatory-editorial-v9-all-news',
     status TEXT NOT NULL DEFAULT 'awaiting_renderer',
     attempts INTEGER NOT NULL DEFAULT 0,
     feed_media_id TEXT,story_media_id TEXT,
@@ -195,7 +192,7 @@ export default {
       if (!env.NEWS_DB) return Response.json({error:"missing database"},{status:503});
       const all=await env.NEWS_DB.prepare("SELECT status,COUNT(*) AS count FROM instagram_scheduled_queue GROUP BY status").all().catch(()=>({results:[]}));
       const last=await env.NEWS_DB.prepare("SELECT ran_at,telegram_seen,queued,error FROM instagram_scheduler_runs ORDER BY id DESC LIMIT 1").first().catch(()=>null);
-      return Response.json({auto_publish:false,cron:"*/30 * * * *",categoryTemplate:"v8",statuses:all.results,lastScheduledRun:last,missing:["CANDIDATORY_RENDERER","INSTAGRAM_SERVER_AUTH"]});
+      return Response.json({auto_publish:false,cron:"*/30 * * * *",categoryTemplate:"v9",statuses:all.results,lastScheduledRun:last,missing:["CANDIDATORY_RENDERER","INSTAGRAM_SERVER_AUTH"]});
     }
     return new Response("Not Found", {status:404});
   },
