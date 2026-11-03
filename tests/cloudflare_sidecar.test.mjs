@@ -16,10 +16,11 @@ function mockDb(){
     }
   };
 }
-test("intake only queues relevant already-published news",async()=>{
+test("intake supports all sourced published news subjects",async()=>{
   const db=mockDb();
   const result=await intake(db,{cap:4});
-  assert.equal(result.added,1);
-  assert.equal(db.calls.length,1);
+  assert.equal(result.added,2);
+  assert.equal(db.calls.length,2);
   assert.equal(db.calls[0].args[0],"a");
+  assert.equal(db.calls[1].args[0],"b");
 });
