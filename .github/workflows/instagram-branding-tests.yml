@@ -21,7 +21,7 @@ jobs:
         with:
           node-version: '22'
       - name: Run publisher state tests
-        run: node --test tests/instagram_worker.test.mjs
+        run: node --test tests/*.test.mjs
 
   python:
     runs-on: ubuntu-latest
