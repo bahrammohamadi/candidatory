@@ -42,3 +42,18 @@ Production Telegram and Bale publishing remain unchanged. Instagram automation i
 
 ## Safety
 All keys/tokens should be configured as secrets. Never include them in GitHub.
+
+## Verified November 3, 2026 deployment findings
+- Live news publisher is Cloudflare Worker `candidatory-news-bot` with the `NEWS_DB` D1 binding.
+- `instagram_jobs` table has now been created **in the actual bound D1 database** and confirmed via `sqlite_master`.
+- The existing Worker has `TELEGRAM_BOT_TOKEN`, `BALE_BOT_TOKEN`, `GEMINI_API_KEY` but **no Composio server API credential or hosted image storage binding**. Do not treat the ChatGPT Composio connection as a Worker API credential.
+- `composio_instagram_adapter.mjs` shows the Composio v3.1 tool endpoint using server-side `x-api-key` and `connected_account_id`; it cannot execute until a project API key and matching connected account ID have been securely configured in the Worker.
+- Both backend and branded-image tests run in GitHub Actions; live Instagram publishing remains off.
+- The existing Python `main.py` is not the currently deployed Worker runtime; avoid assuming it directly controls live Telegram publishing.
+
+## Next production integration
+1. Confirm the selected Composio **project** can use the active `candidatory.ir` account from server-side `/api/v3.1/tools/execute`.
+2. Store a scoped Composio project API key and the server-side connected-account ID as Cloudflare secrets. Never commit them, use the ChatGPT connector's opaque alias as an API account ID, or expose them to browser code.
+3. Deploy the branded JPEG rendering service and public HTTPS media hosting, with a licensed Persian font.
+4. Wire a new event from the **actual Worker** after Telegram delivery is confirmed, writing verified/rights-cleared article metadata to `instagram_jobs`.
+5. Use a separate scheduled consumer to select jobs and run the adapter with `enabled=false` until one approved end-to-end feed + story sample succeeds.
