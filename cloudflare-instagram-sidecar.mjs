@@ -96,13 +96,79 @@ export async function syncTelegramChannel(db, fetchImpl=fetch){
   await ensureTelegramTable(db);
   let added=0;
   for(const item of parsed){
-    const x=await db.prepare(`INSERT OR IGNORE INTO instagram_telegram_posts
+    const x=await db.prepare(`INSERT INTO instagram_telegram_posts
       (telegram_message_id,telegram_url,caption,photo_url,posted_at)
-      VALUES (?,?,?,?,?)`).bind(item.telegram_message_id,item.telegram_url,item.caption,
+      VALUES (?,?,?,?,?) ON CONFLICT(telegram_message_id) DO UPDATE SET
+      photo_url=COALESCE(instagram_telegram_posts.photo_url,excluded.photo_url),
+      posted_at=COALESCE(instagram_telegram_posts.posted_at,excluded.posted_at)`)
+      .bind(item.telegram_message_id,item.telegram_url,item.caption,
        item.photo_url,item.posted_at).run();
     if(x.meta?.changes)added++;
   }
   return {seen:parsed.length,added,latest:parsed[0].telegram_message_id};
+}
+
+/** Server-side selection/queue. No ChatGPT presence is needed for these steps.
+ * Publication is deliberately independent and disabled until private renderer
+ * and Instagram/Composio server credentials are installed and verified.
+ */
+export const INSTAGRAM_CATEGORY_COLORS=Object.freeze({
+  breaking:"#E31336",election:"#1E63E9",analysis:"#F39C12"
+});
+export function classifyForInstagram(caption) {
+  const s=String(caption||"").slice(0,400);
+  if(/(?:^|\\s)(?:خبر فوری|فوری|BREAKING)(?:\\s|:|؛|$)/i.test(s)) return "breaking";
+  if(/گزارش تحلیلی|راهنمای|چگونه|چطور|پیامدها|چه پیامدهایی|جریمندرینگ|راستی\\s*آزمایی|تحلیل|توضیحی|what if/i.test(s)) return "analysis";
+  if(/انتخابات|رأی\\s*گیری|رای\\s*گیری|نامزد|کنگره|شورای شهر|شورا|electoral|election/i.test(s)) return "election";
+  return null;
+}
+export async function ensurePublishingQueue(db) {
+  await db.prepare(`CREATE TABLE IF NOT EXISTS instagram_scheduled_queue (
+    telegram_message_id INTEGER PRIMARY KEY,
+    category_id TEXT NOT NULL,
+    source_url TEXT NOT NULL,
+    source_image_url TEXT NOT NULL,
+    headline TEXT NOT NULL,
+    template_id TEXT NOT NULL DEFAULT 'candidatory-editorial-v8-category-seals',
+    status TEXT NOT NULL DEFAULT 'awaiting_renderer',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    feed_media_id TEXT,story_media_id TEXT,
+    last_error TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`).run();
+}
+export async function queueEligibleTelegramNews(db, {maxNew=4}={}) {
+  await ensurePublishingQueue(db);
+  const rows=await db.prepare(`SELECT p.telegram_message_id,p.caption,p.telegram_url,
+     p.photo_url,p.posted_at,p.status
+     FROM instagram_telegram_posts p
+     LEFT JOIN instagram_category_publications published
+       ON published.telegram_message_id=p.telegram_message_id
+     LEFT JOIN instagram_scheduled_queue queued
+       ON queued.telegram_message_id=p.telegram_message_id
+     WHERE p.status='discovered' AND p.photo_url IS NOT NULL
+       AND p.posted_at IS NOT NULL AND published.telegram_message_id IS NULL
+       AND queued.telegram_message_id IS NULL
+       AND julianday(p.posted_at) >= julianday('now','-24 hours')
+     ORDER BY p.telegram_message_id DESC LIMIT 60`).all();
+  let added=0,eligible=0;
+  for(const row of rows.results||[]) {
+    const category=classifyForInstagram(row.caption);
+    if(!category || !/^https:\/\//.test(row.photo_url))continue;
+    // Only Telegram news having an explicit publisher are queued for verification.
+    if(!/📰|منبع:|خبرگزاری|به گزارش|گاردین|ایسنا|مهر|انتخاب/.test(row.caption))continue;
+    eligible++;
+    const headline=String(row.caption).replace(/^[^\p{L}\p{N}]*/u,"").split(/#|@candidatoryiran|\n/)[0].trim().slice(0,260);
+    if(headline.length<12)continue;
+    const x=await db.prepare(`INSERT OR IGNORE INTO instagram_scheduled_queue
+      (telegram_message_id,category_id,source_url,source_image_url,headline)
+      VALUES(?,?,?,?,?)`).bind(row.telegram_message_id,category,row.telegram_url,
+         row.photo_url,headline).run();
+    if(x.meta?.changes)added++;
+    if(added>=maxNew)break;
+  }
+  return {inspected:(rows.results||[]).length,eligible,queued:added,publishEnabled:false};
 }
 
 export default {
@@ -119,14 +185,19 @@ export default {
     }
     if (u.pathname === "/queue/status") {
       if (!env.NEWS_DB) return Response.json({error:"missing database"},{status:503});
-      const all=await env.NEWS_DB.prepare("SELECT status,COUNT(*) AS count FROM instagram_intake_jobs GROUP BY status").all().catch(()=>({results:[]}));
-      return Response.json({auto_publish:false,statuses:all.results});
+      const all=await env.NEWS_DB.prepare("SELECT status,COUNT(*) AS count FROM instagram_scheduled_queue GROUP BY status").all().catch(()=>({results:[]}));
+      return Response.json({auto_publish:false,cron:"*/30 * * * *",categoryTemplate:"v8",statuses:all.results,missing:["CANDIDATORY_RENDERER","INSTAGRAM_SERVER_AUTH"]});
     }
     return new Response("Not Found", {status:404});
   },
   async scheduled(event,env,ctx) {
     if (!env.NEWS_DB) { console.error("NEWS_DB missing"); return; }
-    const result = await intake(env.NEWS_DB);
-    console.info("Instagram intake only, never auto-published", result);
+    // Telegram retrieval stays independent from the active bot webhook.
+    let source={};try {source=await syncTelegramChannel(env.NEWS_DB)}
+      catch(e){console.error("Telegram read-only fetch failed",String(e).slice(0,180));}
+    let queue={};try {queue=await queueEligibleTelegramNews(env.NEWS_DB)}
+      catch(e){console.error("Instagram queue failed",String(e).slice(0,180));}
+    const legacy=await intake(env.NEWS_DB);
+    console.info("Cloudflare scheduling: intake+queue only; no Instagram publish",source,queue,legacy);
   }
 };
