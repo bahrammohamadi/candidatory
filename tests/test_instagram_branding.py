@@ -27,7 +27,7 @@ class BrandingTests(unittest.TestCase):
 
     def test_missing_font_is_explicit(self):
         with self.assertRaises(FileNotFoundError):
-            render_pair(self.source.getvalue(), "خبر نمونه", "انتخابات", "IRNA", "/missing.ttf")
+            render_pair(self.source.getvalue(), "خبر نمونه", "انتخابات", "IRNA", "/missing.ttf", headline_font_path="/missing.ttf")
 
 
     def test_rendered_jpegs_have_instagram_dimensions(self):
@@ -35,7 +35,7 @@ class BrandingTests(unittest.TestCase):
         if not __import__("os").path.exists(font):
             self.skipTest("No test font available")
         feed_bytes, story_bytes = render_pair(
-            self.source.getvalue(), "اطلاعیه خبری نمونه", "اخبار", "IRNA", font
+            self.source.getvalue(), "اطلاعیه خبری نمونه", "اخبار", "IRNA", font, headline_font_path=font
         )
         with Image.open(io.BytesIO(feed_bytes)) as feed:
             self.assertEqual(feed.size, (1080, 1350))
@@ -55,6 +55,7 @@ class BrandingTests(unittest.TestCase):
             "خبر انتخابات",
             "خبرگزاری مهر",
             font,
+            headline_font_path=font,
         )
         feed = Image.open(io.BytesIO(feed_bytes))
         story = Image.open(io.BytesIO(story_bytes))
@@ -74,7 +75,12 @@ class BrandingTests(unittest.TestCase):
                 "اعلام آخرین نتایج برنامه‌ریزی مسابقات ملی و مرحله استانی دانشجویان",
                 "خبر آموزشی", "ایسنا", font,
                 summary="خلاصه بسیار بلند و نامناسب برای طراحی استوری " * 12,
+                headline_font_path=font,
             )
+
+    def test_missing_explicit_headline_font_fails_closed(self):
+        with self.assertRaises(ValueError):
+            render_pair(self.source.getvalue(), "خبر نمونه", "انتخابات", "ایسنا", "/missing.ttf")
 
     def test_persian_is_not_double_reversed(self):
         # Critical regression: Pillow/libraqm owns RTL shaping and bidi reordering.
@@ -86,7 +92,7 @@ class BrandingTests(unittest.TestCase):
         if not __import__("os").path.exists(font):
             self.skipTest("No test font available")
         with self.assertRaises(ValueError):
-            render_pair(self.source.getvalue(), "خبر " * 100, "شورا", "ایسنا", font)
+            render_pair(self.source.getvalue(), "خبر " * 100, "شورا", "ایسنا", font, headline_font_path=font)
 
 
 if __name__ == "__main__":
