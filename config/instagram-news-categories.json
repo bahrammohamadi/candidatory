@@ -1,0 +1,29 @@
+{
+  "version": 8,
+  "template": "candidatory-editorial-v8-category-seals",
+  "categories": [
+    {
+      "id": "breaking",
+      "label": "خبر فوری",
+      "color": "#E31336",
+      "description": "Time-sensitive, verified and materially new only"
+    },
+    {
+      "id": "election",
+      "label": "خبر انتخاباتی",
+      "color": "#1E63E9",
+      "description": "Elections and related civic reporting"
+    },
+    {
+      "id": "analysis",
+      "label": "آموزشی / تحلیلی",
+      "color": "#F39C12",
+      "description": "Explanatory, background and analysis; not misrepresented as breaking"
+    }
+  ],
+  "logo_asset": "assets/candidatory-profile-logo.jpg.b64",
+  "logo_source": "user-supplied image",
+  "headline_font": "B Titr Bold",
+  "body_font": "Vazirmatn",
+  "require_visual_review": true
+}
