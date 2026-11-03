@@ -17,9 +17,14 @@ RED = "#E31336"
 WHITE = "#FFFFFF"
 CREAM = "#F6F7FA"
 MUTED = "#D4DEED"
+CATEGORY_STAMPS = {
+    "breaking": {"label": "خبر فوری", "color": "#E31336"},
+    "election": {"label": "خبر انتخاباتی", "color": "#1E63E9"},
+    "analysis": {"label": "آموزشی / تحلیلی", "color": "#F39C12"},
+}
 HANDLE = "@candidatory.ir"
 BRAND = "کاندیداتوری"
-TEMPLATE_VERSION = "candidatory-editorial-v7-news-type-polish"
+TEMPLATE_VERSION = "candidatory-editorial-v8-category-seals"
 
 def rtl(value: str) -> str:
     """Store Unicode in logical order; libraqm does shaping and bidi exactly once."""
@@ -110,6 +115,12 @@ def _headline(draw, headline, font_path, y, *, story=False):
         y += font.size+31
     return y
 
+def _resolve_category_stamp(category):
+    if category not in CATEGORY_STAMPS:
+        raise ValueError("Unsupported news category; expected breaking/election/analysis")
+    return CATEGORY_STAMPS[category]
+
+
 def render(source: Image.Image, headline: str, category: str, source_name: str,
            font_path: str, *, story=False, summary: str | None=None,
            headline_font_path: str | None=None) -> Image.Image:
@@ -133,11 +144,12 @@ def render(source: Image.Image, headline: str, category: str, source_name: str,
 
     _photo_panel(canvas,source,38,photo_top,1042,photo_end)
     d=ImageDraw.Draw(canvas)
-    label=category.strip() or "خبر منتخب"
+    stamp=_resolve_category_stamp(category)
+    label=stamp["label"]
     label_font=_font(font_path,35,700)
-    badge_w=max(230,min(400,_width(d,label,label_font)+100))
+    badge_w=max(245,min(520,_width(d,label,label_font)+106))
     bx=1030-badge_w
-    d.rounded_rectangle((bx,photo_top-32,1030,photo_top+59),radius=24,fill=RED,outline=WHITE,width=3)
+    d.rounded_rectangle((bx,photo_top-32,1030,photo_top+59),radius=24,fill=stamp["color"],outline=WHITE,width=3)
     _right(d,1003,photo_top-15,label,label_font,WHITE,max_width=badge_w-55)
 
     title_start=photo_end+(57 if story else 50)
