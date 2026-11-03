@@ -1,0 +1,36 @@
+name: Instagram branded news tests
+
+on:
+  push:
+    branches: [feature/instagram-branded-news]
+  pull_request:
+    paths:
+      - 'instagram_branding.py'
+      - 'instagram_worker.mjs'
+      - 'instagram-requirements.txt'
+      - 'tests/**'
+      - '.github/workflows/instagram-branding-tests.yml'
+  workflow_dispatch:
+
+jobs:
+  node:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Run publisher state tests
+        run: node --test tests/instagram_worker.test.mjs
+
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install renderer requirements
+        run: python -m pip install -r instagram-requirements.txt
+      - name: Run branding validation tests
+        run: python -m unittest discover -s tests -p 'test_instagram_branding.py'
