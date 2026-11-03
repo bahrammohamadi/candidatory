@@ -61,7 +61,7 @@ class BrandingTests(unittest.TestCase):
         self.assertEqual(feed.size, (1080, 1350))
         self.assertEqual(story.size, (1080, 1920))
         # Safe lower strip is not filled with a giant CTA behind reply controls.
-        self.assertTrue(all(abs(a-b) <= 3 for a,b in zip(story.getpixel((500, 1850)), (16, 35, 74))))
+        self.assertTrue(all(abs(a-b) <= 3 for a,b in zip(story.getpixel((500, 1850)), (11, 29, 62))))
 
     def test_stale_oversized_story_summary_rejected(self):
         import os
