@@ -17,19 +17,25 @@ from urllib.request import Request, urlopen
 from instagram_branding import render_pair
 
 FONT_URL = "https://raw.githubusercontent.com/google/fonts/main/ofl/vazirmatn/Vazirmatn%5Bwght%5D.ttf"
-HEADLINE_FONT_URL = "https://raw.githubusercontent.com/google/fonts/main/ofl/estedad/Estedad%5Bwght%5D.ttf"
+# B Titr is supplied from a privately licensed file; never commit its bytes.
+HEADLINE_FONT_ENV = "CANDIDATORY_BTITR_PATH"
 MAX_FONT_BYTES = 3_000_000
 
 
 def resolve_font(path: str | None, *, headline: bool=False) -> str:
+    if headline:
+        approved = path or os.getenv(HEADLINE_FONT_ENV)
+        if not approved or not Path(approved).is_file():
+            raise FileNotFoundError("B Titr Bold missing: supply --headline-font or CANDIDATORY_BTITR_PATH")
+        return approved
     if path:
         if not Path(path).is_file():
             raise FileNotFoundError(path)
         return path
-    target = Path(tempfile.gettempdir()) / ("candidatory-estedad-variable.ttf" if headline else "candidatory-vazirmatn-variable.ttf")
+    target = Path(tempfile.gettempdir()) / "candidatory-vazirmatn-variable.ttf"
     if target.is_file() and target.stat().st_size > 10000:
         return str(target)
-    req = Request(HEADLINE_FONT_URL if headline else FONT_URL, headers={"User-Agent": "CandidatoryEditorialRenderer/1.0"})
+    req = Request(FONT_URL, headers={"User-Agent": "CandidatoryEditorialRenderer/1.0"})
     with urlopen(req, timeout=15) as stream:
         data = stream.read(MAX_FONT_BYTES + 1)
     if not (10_000 < len(data) < MAX_FONT_BYTES):
@@ -47,7 +53,7 @@ def main(argv=None):
     p.add_argument("--category", default="خبر منتخب")
     p.add_argument("--summary", default=None)
     p.add_argument("--font", help="Optional licensed body typeface; defaults to Vazirmatn")
-    p.add_argument("--headline-font", help="Optional licensed news headline typeface; defaults to Estedad")
+    p.add_argument("--headline-font", help="Required licensed B Titr Bold path, or set CANDIDATORY_BTITR_PATH")
     p.add_argument("--output-dir", required=True)
     args=p.parse_args(argv)
     if not args.rights_confirmed:
