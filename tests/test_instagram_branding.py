@@ -29,6 +29,21 @@ class BrandingTests(unittest.TestCase):
         with self.assertRaises(FileNotFoundError):
             render_pair(self.source.getvalue(), "خبر نمونه", "انتخابات", "IRNA", "/missing.ttf")
 
+
+    def test_rendered_jpegs_have_instagram_dimensions(self):
+        font = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+        if not __import__("os").path.exists(font):
+            self.skipTest("No test font available")
+        feed_bytes, story_bytes = render_pair(
+            self.source.getvalue(), "اطلاعیه خبری نمونه", "اخبار", "IRNA", font
+        )
+        with Image.open(io.BytesIO(feed_bytes)) as feed:
+            self.assertEqual(feed.size, (1080, 1350))
+            self.assertEqual(feed.format, "JPEG")
+        with Image.open(io.BytesIO(story_bytes)) as story:
+            self.assertEqual(story.size, (1080, 1920))
+            self.assertEqual(story.format, "JPEG")
+
     def test_bidi_text_nonempty(self):
         self.assertTrue(rtl("اخبار انتخابات"))
 
