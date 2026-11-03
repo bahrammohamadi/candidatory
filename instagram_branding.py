@@ -19,7 +19,7 @@ CREAM = "#F6F7FA"
 MUTED = "#D4DEED"
 HANDLE = "@candidatory.ir"
 BRAND = "کاندیداتوری"
-TEMPLATE_VERSION = "candidatory-editorial-v5-news-typography"
+TEMPLATE_VERSION = "candidatory-editorial-v6-b-titr-vazirmatn"
 
 def rtl(value: str) -> str:
     """Store Unicode in logical order; libraqm does shaping and bidi exactly once."""
@@ -115,6 +115,8 @@ def render(source: Image.Image, headline: str, category: str, source_name: str,
            headline_font_path: str | None=None) -> Image.Image:
     if not headline.strip() or not source_name.strip():
         raise ValueError("A sourced headline and publisher are required")
+    if headline_font_path is None:
+        raise ValueError("B Titr Bold headline font must be explicitly supplied")
     if not features.check("raqm"):
         raise RuntimeError("Pillow libraqm required for correct Persian RTL rendering")
     w,h=(1080,1920) if story else (1080,1350)
@@ -132,7 +134,7 @@ def render(source: Image.Image, headline: str, category: str, source_name: str,
     _photo_panel(canvas,source,38,photo_top,1042,photo_end)
     d=ImageDraw.Draw(canvas)
     label=category.strip() or "خبر منتخب"
-    label_font=_font(headline_font_path or font_path,33,650)
+    label_font=_font(font_path,33,700)
     badge_w=max(230,min(400,_width(d,label,label_font)+100))
     bx=1030-badge_w
     d.rounded_rectangle((bx,photo_top-32,1030,photo_top+59),radius=24,fill=RED,outline=WHITE,width=3)
@@ -158,7 +160,7 @@ def render(source: Image.Image, headline: str, category: str, source_name: str,
 
     if story:
         d.rounded_rectangle((64,1600,1016,1688),radius=27,fill=RED)
-        _right(d,971,1619,"خبر کامل در آخرین پست",_font(headline_font_path or font_path,35,650),WHITE,max_width=875)
+        _right(d,971,1619,"خبر کامل در آخرین پست",_font(font_path,35,700),WHITE,max_width=875)
         footer_y=1540
     else:
         footer_y=1246
