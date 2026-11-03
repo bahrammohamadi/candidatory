@@ -2,7 +2,7 @@ name: Instagram branded news tests
 
 on:
   push:
-    branches: [feature/instagram-branded-news]
+    branches: [main, feature/instagram-branded-news]
   pull_request:
     paths:
       - 'instagram_branding.py'
