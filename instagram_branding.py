@@ -19,16 +19,26 @@ CREAM = "#F6F7FA"
 MUTED = "#D4DEED"
 HANDLE = "@candidatory.ir"
 BRAND = "کاندیداتوری"
-TEMPLATE_VERSION = "candidatory-editorial-v4-authentic-logo"
+TEMPLATE_VERSION = "candidatory-editorial-v5-news-typography"
 
 def rtl(value: str) -> str:
     """Store Unicode in logical order; libraqm does shaping and bidi exactly once."""
     return str(value)
 
-def _font(path: str, size: int) -> ImageFont.FreeTypeFont:
+def _font(path: str, size: int, weight: int | None = None) -> ImageFont.FreeTypeFont:
     if not Path(path).is_file():
         raise FileNotFoundError("A licensed Persian font must be configured via font_path")
-    return ImageFont.truetype(path, size)
+    font = ImageFont.truetype(path, size)
+    if weight is not None:
+        try:
+            axes = font.get_variation_axes()
+            if axes and any("Weight" in str(axis.get("name","")) for axis in axes):
+                axis = axes[0]
+                clamped = max(axis["minimum"], min(axis["maximum"], weight))
+                font.set_variation_by_axes([clamped])
+        except (OSError, AttributeError, ValueError, KeyError):
+            pass
+    return font
 
 def _width(draw, text: str, font) -> int:
     box = draw.textbbox((0, 0), text, font=font, direction="rtl")
@@ -56,9 +66,9 @@ def _right(draw, x, y, text, font, color, max_width=None):
         raise ValueError("RTL field does not fit its visual boundary")
     draw.text((x, y), value, font=font, fill=color, anchor="ra", direction="rtl")
 
-def _fitted_lines(text, draw, font_path, *, max_width, max_lines, max_size, min_size):
+def _fitted_lines(text, draw, font_path, *, max_width, max_lines, max_size, min_size, weight=None):
     for size in range(max_size, min_size - 1, -2):
-        font = _font(font_path, size)
+        font = _font(font_path, size, weight)
         try:
             return _wrap(text, draw, font, max_width, max_lines), font
         except ValueError:
@@ -93,7 +103,7 @@ def _photo_panel(canvas, source, left, top, right, bottom):
 def _headline(draw, headline, font_path, y, *, story=False):
     lines, font = _fitted_lines(
         headline,draw,font_path,max_width=950,max_lines=3 if story else 2,
-        max_size=58 if story else 61,min_size=38 if story else 43)
+        max_size=58 if story else 61,min_size=38 if story else 43,weight=800)
     x=1004
     for line in lines:
         _right(draw,x,y,line,font,WHITE,max_width=950)
@@ -101,7 +111,8 @@ def _headline(draw, headline, font_path, y, *, story=False):
     return y
 
 def render(source: Image.Image, headline: str, category: str, source_name: str,
-           font_path: str, *, story=False, summary: str | None=None) -> Image.Image:
+           font_path: str, *, story=False, summary: str | None=None,
+           headline_font_path: str | None=None) -> Image.Image:
     if not headline.strip() or not source_name.strip():
         raise ValueError("A sourced headline and publisher are required")
     if not features.check("raqm"):
@@ -115,13 +126,13 @@ def render(source: Image.Image, headline: str, category: str, source_name: str,
     else:
         header_y=37; photo_top=180; photo_end=819
     _brand_icon(canvas,d,54,header_y,91)
-    _right(d,1007,header_y+7,BRAND,_font(font_path,64),WHITE,max_width=600)
+    _right(d,1007,header_y+7,BRAND,_font(headline_font_path or font_path,64,700),WHITE,max_width=600)
     d.text((160,header_y+77),"CANDIDATORY.IR",font=ImageFont.load_default(size=24),fill=MUTED)
 
     _photo_panel(canvas,source,38,photo_top,1042,photo_end)
     d=ImageDraw.Draw(canvas)
     label=category.strip() or "خبر منتخب"
-    label_font=_font(font_path,33)
+    label_font=_font(headline_font_path or font_path,33,650)
     badge_w=max(230,min(400,_width(d,label,label_font)+100))
     bx=1030-badge_w
     d.rounded_rectangle((bx,photo_top-32,1030,photo_top+59),radius=24,fill=RED,outline=WHITE,width=3)
@@ -130,12 +141,12 @@ def render(source: Image.Image, headline: str, category: str, source_name: str,
     title_start=photo_end+(57 if story else 50)
     # Accent beside headline, not overlaid on source photograph.
     d.rounded_rectangle((1022,title_start-3,1036,title_start+225),radius=7,fill=RED)
-    last_title_y=_headline(d,headline,font_path,title_start,story=story)
+    last_title_y=_headline(d,headline,headline_font_path or font_path,title_start,story=story)
 
     summary_y=max(last_title_y+28,1370 if story else 1074)
     if summary:
         lines,font=_fitted_lines(summary,d,font_path,max_width=944,max_lines=3 if story else 2,
-                                 max_size=34 if story else 30,min_size=25)
+                                 max_size=34 if story else 30,min_size=25,weight=400)
         summary_height = len(lines)*(font.size+24)
         if story and summary_y+summary_height > 1520:
             raise ValueError("Story summary overlaps fixed source/CTA area")
@@ -147,24 +158,25 @@ def render(source: Image.Image, headline: str, category: str, source_name: str,
 
     if story:
         d.rounded_rectangle((64,1600,1016,1688),radius=27,fill=RED)
-        _right(d,971,1619,"خبر کامل در آخرین پست",_font(font_path,35),WHITE,max_width=875)
+        _right(d,971,1619,"خبر کامل در آخرین پست",_font(headline_font_path or font_path,35,650),WHITE,max_width=875)
         footer_y=1540
     else:
         footer_y=1246
     d.rounded_rectangle((39,footer_y,1040,footer_y+65),radius=22,outline=MUTED,width=2)
     d.text((61,footer_y+19),HANDLE,font=ImageFont.load_default(size=29),fill=WHITE)
-    _right(d,1009,footer_y+13,"منبع: "+source_name,_font(font_path,26),WHITE,max_width=550)
+    _right(d,1009,footer_y+13,"منبع: "+source_name,_font(font_path,26,450),WHITE,max_width=550)
     return canvas
 
 def render_pair(image_bytes: bytes, headline: str, category: str,
-                source_name: str, font_path: str, *, summary: str | None=None) -> tuple[bytes,bytes]:
+                source_name: str, font_path: str, *, summary: str | None=None,
+                headline_font_path: str | None=None) -> tuple[bytes,bytes]:
     if len(image_bytes)>15_000_000:
         raise ValueError("Source image exceeds 15MB")
     with Image.open(BytesIO(image_bytes)) as im:
         if im.width<320 or im.height<320:
             raise ValueError("Source image resolution is too low")
-        feed=render(im,headline,category,source_name,font_path,summary=summary)
-        story=render(im,headline,category,source_name,font_path,story=True,summary=summary)
+        feed=render(im,headline,category,source_name,font_path,summary=summary,headline_font_path=headline_font_path)
+        story=render(im,headline,category,source_name,font_path,story=True,summary=summary,headline_font_path=headline_font_path)
     def encode(im):
         b=BytesIO()
         im.save(b,format="JPEG",quality=91,optimize=True,subsampling=0)
