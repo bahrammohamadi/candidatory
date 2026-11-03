@@ -44,6 +44,25 @@ class BrandingTests(unittest.TestCase):
             self.assertEqual(story.size, (1080, 1920))
             self.assertEqual(story.format, "JPEG")
 
+    def test_dimensions_and_story_safe_footer(self):
+        from pathlib import Path
+        font = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+        if not Path(font).exists():
+            self.skipTest("CI system font unavailable")
+        feed_bytes, story_bytes = render_pair(
+            self.source.getvalue(),
+            "آغاز رأی گیری انتخابات",
+            "خبر انتخابات",
+            "خبرگزاری مهر",
+            font,
+        )
+        feed = Image.open(io.BytesIO(feed_bytes))
+        story = Image.open(io.BytesIO(story_bytes))
+        self.assertEqual(feed.size, (1080, 1350))
+        self.assertEqual(story.size, (1080, 1920))
+        # Safe lower strip is not filled with a giant CTA behind reply controls.
+        self.assertEqual(story.getpixel((500, 1850)), (16, 35, 74))
+
     def test_bidi_text_nonempty(self):
         self.assertTrue(rtl("اخبار انتخابات"))
 
