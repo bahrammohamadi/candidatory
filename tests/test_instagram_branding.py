@@ -35,7 +35,7 @@ class BrandingTests(unittest.TestCase):
         if not __import__("os").path.exists(font):
             self.skipTest("No test font available")
         feed_bytes, story_bytes = render_pair(
-            self.source.getvalue(), "اطلاعیه خبری نمونه", "اخبار", "IRNA", font, headline_font_path=font
+            self.source.getvalue(), "اطلاعیه خبری نمونه", "election", "IRNA", font, headline_font_path=font
         )
         with Image.open(io.BytesIO(feed_bytes)) as feed:
             self.assertEqual(feed.size, (1080, 1350))
@@ -52,7 +52,7 @@ class BrandingTests(unittest.TestCase):
         feed_bytes, story_bytes = render_pair(
             self.source.getvalue(),
             "آغاز رأی گیری انتخابات",
-            "خبر انتخابات",
+            "election",
             "خبرگزاری مهر",
             font,
             headline_font_path=font,
@@ -73,7 +73,7 @@ class BrandingTests(unittest.TestCase):
             render_pair(
                 self.source.getvalue(),
                 "اعلام آخرین نتایج برنامه‌ریزی مسابقات ملی و مرحله استانی دانشجویان",
-                "خبر آموزشی", "ایسنا", font,
+                "analysis", "ایسنا", font,
                 summary="خلاصه بسیار بلند و نامناسب برای طراحی استوری " * 12,
                 headline_font_path=font,
             )
@@ -81,6 +81,13 @@ class BrandingTests(unittest.TestCase):
     def test_missing_explicit_headline_font_fails_closed(self):
         with self.assertRaises(ValueError):
             render_pair(self.source.getvalue(), "خبر نمونه", "انتخابات", "ایسنا", "/missing.ttf")
+
+    def test_categories_have_distinct_colors(self):
+        from instagram_branding import CATEGORY_STAMPS
+        self.assertEqual(CATEGORY_STAMPS["breaking"]["color"], "#E31336")
+        self.assertEqual(CATEGORY_STAMPS["election"]["color"], "#1E63E9")
+        self.assertEqual(CATEGORY_STAMPS["analysis"]["color"], "#F39C12")
+        self.assertEqual(len({v["color"] for v in CATEGORY_STAMPS.values()}), 3)
 
     def test_persian_is_not_double_reversed(self):
         # Critical regression: Pillow/libraqm owns RTL shaping and bidi reordering.
@@ -92,7 +99,7 @@ class BrandingTests(unittest.TestCase):
         if not __import__("os").path.exists(font):
             self.skipTest("No test font available")
         with self.assertRaises(ValueError):
-            render_pair(self.source.getvalue(), "خبر " * 100, "شورا", "ایسنا", font, headline_font_path=font)
+            render_pair(self.source.getvalue(), "خبر " * 100, "election", "ایسنا", font, headline_font_path=font)
 
 
 if __name__ == "__main__":
