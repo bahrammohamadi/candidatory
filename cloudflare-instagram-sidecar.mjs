@@ -117,9 +117,9 @@ export const INSTAGRAM_CATEGORY_COLORS=Object.freeze({
 });
 export function classifyForInstagram(caption) {
   const s=String(caption||"").slice(0,400);
-  if(/(?:^|\\s)(?:خبر فوری|فوری|BREAKING)(?:\\s|:|؛|$)/i.test(s)) return "breaking";
-  if(/گزارش تحلیلی|راهنمای|چگونه|چطور|پیامدها|چه پیامدهایی|جریمندرینگ|راستی\\s*آزمایی|تحلیل|توضیحی|what if/i.test(s)) return "analysis";
-  if(/انتخابات|رأی\\s*گیری|رای\\s*گیری|نامزد|کنگره|شورای شهر|شورا|electoral|election/i.test(s)) return "election";
+  if(/(?:^|\s)(?:خبر فوری|فوری|BREAKING)(?:\s|:|؛|$)/i.test(s)) return "breaking";
+  if(/گزارش تحلیلی|راهنمای|چگونه|چطور|پیامدها|چه پیامدهایی|جریمندرینگ|راستی\s*آزمایی|تحلیل|توضیحی|what if/i.test(s)) return "analysis";
+  if(/انتخابات|رأی\s*گیری|رای\s*گیری|نامزد|کنگره|شورای شهر|شورا|electoral|election/i.test(s)) return "election";
   return null;
 }
 export async function ensurePublishingQueue(db) {
