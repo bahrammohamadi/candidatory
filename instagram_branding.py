@@ -18,6 +18,7 @@ WHITE = "#FFFFFF"
 LIGHT = "#F0F3FA"
 HANDLE = "@candidatory.ir"
 BRAND = "کاندیداتوری"
+TEMPLATE_VERSION = "candidatory-editorial-v2"
 
 
 def rtl(value: str) -> str:
@@ -56,49 +57,55 @@ def _right(draw, x, y, label, font, fill, max_width=None):
 
 
 def _base(source: Image.Image, size: tuple[int, int], is_story: bool):
+    """Branded press image with reserved story UI safe areas.
+
+    No generic ballot-box fallback: caller must provide a verified image.
+    """
     width, height = size
-    picture_top = int(height * (0.13 if is_story else 0.14))
-    picture_bottom = int(height * (0.68 if is_story else 0.74))
-    picture = ImageOps.fit(source.convert("RGB"), (width, picture_bottom - picture_top), method=Image.Resampling.LANCZOS, centering=(0.5, 0.38))
+    picture_top = 285 if is_story else 185
+    picture_bottom = 1030 if is_story else 840
     canvas = Image.new("RGB", size, NAVY)
-    canvas.paste(picture, (0, picture_top))
     draw = ImageDraw.Draw(canvas)
-    draw.rectangle((0, picture_bottom, width, height), fill=WHITE if is_story else NAVY)
-    draw.rectangle((width - 16, picture_bottom, width, height - 24), fill=RED)
+    draw.polygon(((0, 0), (160, 0), (0, 240)), fill=RED)
+    picture = ImageOps.fit(source.convert("RGB"), (width - 72, picture_bottom - picture_top), method=Image.Resampling.LANCZOS, centering=(0.5, 0.42))
+    canvas.paste(picture, (36, picture_top))
+    draw.rounded_rectangle((34, picture_top, width-34, picture_bottom), radius=18, outline=WHITE, width=4)
+    draw.rectangle((width - 17, picture_bottom + 32, width - 7, picture_bottom + 285), fill=RED)
     return canvas, draw, picture_bottom
 
 
 def render(source: Image.Image, headline: str, category: str, source_name: str, font_path: str, *, story=False) -> Image.Image:
-    """Create a single branded image. Neither headline nor category is AI-invented."""
+    """Use one editorial layout for both outputs; the input must be source-verified."""
     if not headline.strip() or not source_name.strip():
         raise ValueError("A sourced headline and publisher are required")
     w, h = (1080, 1920) if story else (1080, 1350)
     canvas, draw, lower = _base(source, (w, h), story)
-    brand_font = _font(font_path, 76)
-    label_font = _font(font_path, 33)
-    title_font = _font(font_path, 61 if story else 65)
+    brand_font = _font(font_path, 65)
+    label_font = _font(font_path, 32)
+    title_font = _font(font_path, 55 if story else 61)
     small_font = _font(font_path, 27)
-    _right(draw, w - 55, 35, BRAND, brand_font, WHITE)
-    draw.rectangle((34, 116, w - 34, 121), fill=RED)
-    draw.text((45, 135), HANDLE, font=small_font, fill=WHITE)
+    # Simple prominent header, deliberately clear of Instagram story controls.
+    header_y = 170 if story else 40
+    _right(draw, w - 60, header_y, BRAND, brand_font, WHITE)
+    draw.text((46, header_y + 70), HANDLE, font=small_font, fill=LIGHT)
     label = category.strip() or "خبر منتخب"
-    draw.rounded_rectangle((w - 365, lower - 82, w - 35, lower - 16), radius=15, fill=RED)
-    _right(draw, w - 55, lower - 73, label, label_font, WHITE)
-
-    headline_color = NAVY if story else WHITE
-    y = lower + 57
-    lines = _wrap(headline, draw, title_font, w - 130, limit=3)
+    draw.rounded_rectangle((w - 378, lower - 54, w - 50, lower + 15), radius=18, fill=RED)
+    _right(draw, w - 72, lower - 42, label, label_font, WHITE)
+    y = lower + 70
+    lines = _wrap(headline, draw, title_font, w - 138, limit=3)
     for line in lines:
-        _right(draw, w - 55, y, line, title_font, headline_color)
-        y += 92 if story else 91
-    footer_color = NAVY if story else LIGHT
-    footer_y = h - (225 if story else 90)
-    _right(draw, w - 55, footer_y, "منبع: " + source_name, small_font, footer_color)
+        _right(draw, w - 65, y, line, title_font, WHITE)
+        y += 93 if story else 88
+    # Always show attribution and a clear editorial footer.
     if story:
-        draw.rounded_rectangle((75, h - 155, w - 75, h - 60), radius=28, fill=RED)
-        _right(draw, w - 120, h - 139, "خبر کامل در آخرین پست", label_font, WHITE)
+        _right(draw, w - 68, 1515, "منبع: " + source_name, small_font, LIGHT)
+        draw.rounded_rectangle((78, 1623, w - 78, 1712), radius=25, fill=RED)
+        _right(draw, w - 126, 1642, "خبر کامل در آخرین پست", label_font, WHITE)
+        # The final 200px remain free for Instagram's story reply controls.
     else:
-        draw.text((45, h - 72), HANDLE, font=small_font, fill=WHITE)
+        _right(draw, w - 65, h - 115, "منبع: " + source_name, small_font, LIGHT)
+        draw.line((40, h - 67, w - 40, h - 67), fill=RED, width=4)
+        draw.text((45, h - 57), HANDLE, font=small_font, fill=WHITE)
     return canvas
 
 
