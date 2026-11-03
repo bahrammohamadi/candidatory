@@ -1,1 +1,3 @@
-Pillow>=10.4,<13\narabic-reshaper>=3,<4\npython-bidi>=0.6,<1\n
+Pillow>=10.4,<13
+arabic-reshaper>=3,<4
+python-bidi>=0.6,<1
