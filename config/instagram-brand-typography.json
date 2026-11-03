@@ -1,6 +1,6 @@
 {
   "profile_id": "candidatory-instagram",
-  "version": 6,
+  "version": 7,
   "status": "approved_for_single_test",
   "format": {
     "feed": [
@@ -26,24 +26,25 @@
     },
     "body": {
       "family": "Vazirmatn",
-      "style": "Regular",
+      "style": "Regular / Medium (summary 550, source 600)",
       "role": [
         "summary",
         "source",
-        "date"
+        "date",
+        "latin_handle"
       ],
       "source": "https://github.com/rastikerdar/vazirmatn"
     },
     "labels": {
       "family": "Vazirmatn",
-      "style": "Bold",
+      "style": "Bold (category 700, story CTA 750)",
       "role": [
         "category",
         "story_cta"
       ]
     }
   },
-  "template": "candidatory-editorial-v6-b-titr-vazirmatn",
+  "template": "candidatory-editorial-v7-news-type-polish",
   "layout_locked": true,
   "never_publish_if_font_missing": true,
   "news_source": "@candidatoryiran",
