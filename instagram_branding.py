@@ -129,6 +129,11 @@ def render(source: Image.Image, headline: str, category: str, source_name: str,
     if summary:
         lines,font=_fitted_lines(summary,d,font_path,max_width=944,max_lines=3 if story else 2,
                                  max_size=34 if story else 30,min_size=25)
+        summary_height = len(lines)*(font.size+24)
+        if story and summary_y+summary_height > 1520:
+            raise ValueError("Story summary overlaps fixed source/CTA area")
+        if not story and summary_y+summary_height > 1228:
+            raise ValueError("Feed summary overlaps source bar")
         for line in lines:
             _right(d,1003,summary_y,line,font,MUTED,max_width=944)
             summary_y += font.size+24
