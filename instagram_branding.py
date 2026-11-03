@@ -1,146 +1,160 @@
-"""Reusable branded 4:5 feed and 9:16 story images for Candidatory.
+"""Candidatory editorial news templates — v4.
 
-Render only verified news and licensed/authorized source images.
-No network calls or automatic publishing occur in this module.
-Requires Pillow with libraqm and a licensed Persian TTF font.
+Stable original-photo compositing with one-pass Persian RTL (Pillow libraqm).
+Generate Instagram feed 4:5 and story 9:16; images only, never publishes.
+Fail closed if the title does not fit; verify rights before passing an image.
 """
 from __future__ import annotations
 
 from io import BytesIO
 from pathlib import Path
-from PIL import Image, ImageDraw, ImageFont, ImageOps, features
+from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageFilter, features
 
 NAVY = "#10234A"
-RED = "#D80D2C"
+DEEP = "#0B1D3E"
+RED = "#E31336"
 WHITE = "#FFFFFF"
-LIGHT = "#F0F3FA"
+CREAM = "#F6F7FA"
+MUTED = "#D4DEED"
 HANDLE = "@candidatory.ir"
 BRAND = "کاندیداتوری"
-TEMPLATE_VERSION = "candidatory-editorial-v3-raqm"
-
+TEMPLATE_VERSION = "candidatory-editorial-v4"
 
 def rtl(value: str) -> str:
-    """Keep logical Unicode order; libraqm performs shaping once during draw."""
+    """Store Unicode in logical order; libraqm does shaping and bidi exactly once."""
     return str(value)
-
 
 def _font(path: str, size: int) -> ImageFont.FreeTypeFont:
     if not Path(path).is_file():
         raise FileNotFoundError("A licensed Persian font must be configured via font_path")
     return ImageFont.truetype(path, size)
 
+def _width(draw, text: str, font) -> int:
+    box = draw.textbbox((0, 0), text, font=font, direction="rtl")
+    return box[2] - box[0]
 
-def _width(draw, content, font):
-    bbox = draw.textbbox((0, 0), content, font=font, direction="rtl")
-    return bbox[2] - bbox[0]
-
-
-def _wrap(text: str, draw: ImageDraw.ImageDraw, font, max_width: int, limit: int = 3):
-    words = str(text).split()
-    lines, current = [], ""
+def _wrap(text: str, draw, font, limit_width: int, max_lines: int):
+    words = str(text).strip().split()
+    lines, line = [], ""
     for word in words:
-        candidate = (current + " " + word).strip()
-        if current and _width(draw, candidate, font) > max_width:
-            lines.append(current)
-            current = word
+        proposed = (line + " " + word).strip()
+        if line and _width(draw, proposed, font) > limit_width:
+            lines.append(line)
+            line = word
         else:
-            current = candidate
-    if current:
-        lines.append(current)
-    if len(lines) > limit or any(_width(draw, line, font) > max_width for line in lines):
-        raise ValueError("Headline does not fit the approved template")
+            line = proposed
+    if line:
+        lines.append(line)
+    if len(lines) > max_lines or any(_width(draw, t, font) > limit_width for t in lines):
+        raise ValueError("Persian text exceeds approved template safe bounds")
     return lines
 
+def _right(draw, x, y, text, font, color, max_width=None):
+    value = rtl(text)
+    if max_width is not None and _width(draw, value, font) > max_width:
+        raise ValueError("RTL field does not fit its visual boundary")
+    draw.text((x, y), value, font=font, fill=color, anchor="ra", direction="rtl")
 
-def _right(draw, x, y, label, font, fill, max_width=None):
-    label = rtl(label)
-    if max_width and _width(draw, label, font) > max_width:
-        raise ValueError("Text exceeds available width")
-    draw.text((x, y), label, font=font, fill=fill, anchor="ra", direction="rtl")
+def _fitted_lines(text, draw, font_path, *, max_width, max_lines, max_size, min_size):
+    for size in range(max_size, min_size - 1, -2):
+        font = _font(font_path, size)
+        try:
+            return _wrap(text, draw, font, max_width, max_lines), font
+        except ValueError:
+            pass
+    raise ValueError("Text too long: editorial shortening is required")
 
+def _brand_icon(draw, x, y, size):
+    """Native vector emblem; never display the generic ballot-box illustration."""
+    draw.rounded_rectangle((x, y, x+size, y+size), radius=size//5, fill=WHITE)
+    p=size//7
+    draw.rounded_rectangle((x+p, y+p, x+size-p, y+size-p), radius=size//7, fill=NAVY)
+    draw.polygon([(x+size-20,y+8),(x+size-8,y+8),(x+size-8,y+25)],fill=RED)
 
-def _base(source: Image.Image, size: tuple[int, int], is_story: bool):
-    """Branded press image with reserved story UI safe areas.
+def _photo_panel(canvas, source, left, top, right, bottom):
+    pw, ph = right-left, bottom-top
+    source = source.convert("RGB")
+    # Fill unused space with blurred version; preserve the entire source photograph/poster.
+    background = ImageOps.fit(source,(pw,ph),method=Image.Resampling.LANCZOS)
+    background = background.filter(ImageFilter.GaussianBlur(20))
+    canvas.paste(background,(left,top))
+    foreground = ImageOps.contain(source, (pw,ph), method=Image.Resampling.LANCZOS)
+    canvas.paste(foreground,(left+(pw-foreground.width)//2,top+(ph-foreground.height)//2))
+    d=ImageDraw.Draw(canvas)
+    d.rounded_rectangle((left,top,right,bottom),radius=20,outline=WHITE,width=4)
 
-    No generic ballot-box fallback: caller must provide a verified image.
-    """
-    width, height = size
-    picture_top = 375 if is_story else 185
-    picture_bottom = 1060 if is_story else 840
-    canvas = Image.new("RGB", size, NAVY)
-    draw = ImageDraw.Draw(canvas)
-    draw.polygon(((0, 0), (160, 0), (0, 240)), fill=RED)
-    picture = ImageOps.fit(source.convert("RGB"), (width - 72, picture_bottom - picture_top), method=Image.Resampling.LANCZOS, centering=(0.5, 0.42))
-    canvas.paste(picture, (36, picture_top))
-    draw.rounded_rectangle((34, picture_top, width-34, picture_bottom), radius=18, outline=WHITE, width=4)
-    draw.rectangle((width - 17, picture_bottom + 32, width - 7, picture_bottom + 285), fill=RED)
-    return canvas, draw, picture_bottom
+def _headline(draw, headline, font_path, y, *, story=False):
+    lines, font = _fitted_lines(
+        headline,draw,font_path,max_width=950,max_lines=3 if story else 2,
+        max_size=58 if story else 61,min_size=38 if story else 43)
+    x=1004
+    for line in lines:
+        _right(draw,x,y,line,font,WHITE,max_width=950)
+        y += font.size+31
+    return y
 
-
-def render(source: Image.Image, headline: str, category: str, source_name: str, font_path: str, *, story=False) -> Image.Image:
-    """Use one editorial layout for both outputs; the input must be source-verified."""
+def render(source: Image.Image, headline: str, category: str, source_name: str,
+           font_path: str, *, story=False, summary: str | None=None) -> Image.Image:
     if not headline.strip() or not source_name.strip():
         raise ValueError("A sourced headline and publisher are required")
     if not features.check("raqm"):
-        raise RuntimeError("Pillow must support libraqm for Persian text")
-    w, h = (1080, 1920) if story else (1080, 1350)
-    canvas, draw, lower = _base(source, (w, h), story)
-    brand_font = _font(font_path, 65)
-    label_font = _font(font_path, 32)
-    small_font = _font(font_path, 27)
-    # Clear cream banner below story controls, with brand mark at a fixed position.
-    banner_top = 230 if story else 22
-    banner_bottom = 355 if story else 160
-    draw.rounded_rectangle((35, banner_top, w - 35, banner_bottom), radius=28, fill=WHITE)
-    draw.rounded_rectangle((55, banner_top + 26, 147, banner_top + 106), radius=16, outline=RED, width=7)
-    draw.line(((72, banner_top + 68), (92, banner_top + 86), (129, banner_top + 43)), fill=RED, width=9)
-    _right(draw, w - 65, banner_top + 30, BRAND, brand_font, NAVY)
-    draw.text((46, banner_bottom + 14), HANDLE, font=ImageFont.load_default(size=29), fill=LIGHT)
-    label = category.strip() or "خبر منتخب"
-    draw.rounded_rectangle((w - 378, lower - 54, w - 50, lower + 15), radius=18, fill=RED)
-    _right(draw, w - 72, lower - 42, label, label_font, WHITE)
-    y = lower + 70
-    lines = None
-    title_font = None
-    for size in range(57 if not story else 54, 37, -2):
-        candidate_font = _font(font_path, size)
-        try:
-            candidate_lines = _wrap(headline, draw, candidate_font, w - 138, limit=3 if story else 2)
-        except ValueError:
-            continue
-        lines, title_font = candidate_lines, candidate_font
-        break
-    if lines is None:
-        raise ValueError("Headline too long: shorten it before publishing")
-    for line in lines:
-        _right(draw, w - 65, y, line, title_font, WHITE)
-        y += 91 if story else 88
-    # Always show attribution and a clear editorial footer.
+        raise RuntimeError("Pillow libraqm required for correct Persian RTL rendering")
+    w,h=(1080,1920) if story else (1080,1350)
+    canvas=Image.new("RGB",(w,h),DEEP)
+    d=ImageDraw.Draw(canvas)
+    d.polygon(((0,0),(225,0),(0,280)),fill=RED)
     if story:
-        _right(draw, w - 68, 1470, "منبع", small_font, LIGHT)
-        _right(draw, w - 180, 1470, source_name, small_font, LIGHT)
-        draw.rounded_rectangle((78, 1540, w - 78, 1635), radius=25, fill=RED)
-        _right(draw, w - 126, 1560, "خبر کامل در آخرین پست", label_font, WHITE)
-        # The final 285px stay clear for Instagram's reply controls.
+        header_y=236; photo_top=375; photo_end=1080
     else:
-        _right(draw, w - 65, h - 115, "منبع", small_font, LIGHT)
-        _right(draw, w - 175, h - 115, source_name, small_font, LIGHT)
-        draw.line((40, h - 67, w - 40, h - 67), fill=RED, width=4)
-        draw.text((45, h - 57), HANDLE, font=ImageFont.load_default(size=29), fill=WHITE)
+        header_y=37; photo_top=180; photo_end=819
+    _brand_icon(d,54,header_y,91)
+    _right(d,1007,header_y+7,BRAND,_font(font_path,64),WHITE,max_width=600)
+    d.text((160,header_y+77),"CANDIDATORY.IR",font=ImageFont.load_default(size=24),fill=MUTED)
+
+    _photo_panel(canvas,source,38,photo_top,1042,photo_end)
+    d=ImageDraw.Draw(canvas)
+    label=category.strip() or "خبر منتخب"
+    label_font=_font(font_path,33)
+    badge_w=max(230,min(400,_width(d,label,label_font)+100))
+    bx=1030-badge_w
+    d.rounded_rectangle((bx,photo_top-32,1030,photo_top+59),radius=24,fill=RED,outline=WHITE,width=3)
+    _right(d,1003,photo_top-15,label,label_font,WHITE,max_width=badge_w-55)
+
+    title_start=photo_end+(57 if story else 50)
+    # Accent beside headline, not overlaid on source photograph.
+    d.rounded_rectangle((1022,title_start-3,1036,title_start+225),radius=7,fill=RED)
+    last_title_y=_headline(d,headline,font_path,title_start,story=story)
+
+    summary_y=max(last_title_y+28,1370 if story else 1074)
+    if summary:
+        lines,font=_fitted_lines(summary,d,font_path,max_width=944,max_lines=3 if story else 2,
+                                 max_size=34 if story else 30,min_size=25)
+        for line in lines:
+            _right(d,1003,summary_y,line,font,MUTED,max_width=944)
+            summary_y += font.size+24
+
+    if story:
+        d.rounded_rectangle((64,1600,1016,1688),radius=27,fill=RED)
+        _right(d,971,1619,"خبر کامل در آخرین پست",_font(font_path,35),WHITE,max_width=875)
+        footer_y=1540
+    else:
+        footer_y=1246
+    d.rounded_rectangle((39,footer_y,1040,footer_y+65),radius=22,outline=MUTED,width=2)
+    d.text((61,footer_y+19),HANDLE,font=ImageFont.load_default(size=29),fill=WHITE)
+    _right(d,1009,footer_y+13,"منبع: "+source_name,_font(font_path,26),WHITE,max_width=550)
     return canvas
 
-
-def render_pair(image_bytes: bytes, headline: str, category: str, source_name: str, font_path: str) -> tuple[bytes, bytes]:
-    """Return (feed_jpeg, story_jpeg) suitable for uploading to public HTTPS media URLs."""
-    if len(image_bytes) > 15_000_000:
-        raise ValueError("Source image exceeds 15 MB")
-    with Image.open(BytesIO(image_bytes)) as img:
-        if img.width < 320 or img.height < 320:
+def render_pair(image_bytes: bytes, headline: str, category: str,
+                source_name: str, font_path: str, *, summary: str | None=None) -> tuple[bytes,bytes]:
+    if len(image_bytes)>15_000_000:
+        raise ValueError("Source image exceeds 15MB")
+    with Image.open(BytesIO(image_bytes)) as im:
+        if im.width<320 or im.height<320:
             raise ValueError("Source image resolution is too low")
-        feed = render(img, headline, category, source_name, font_path)
-        story = render(img, headline, category, source_name, font_path, story=True)
-    def encode(image):
-        buffer = BytesIO()
-        image.save(buffer, format="JPEG", quality=88, optimize=True, subsampling=0)
-        return buffer.getvalue()
-    return encode(feed), encode(story)
+        feed=render(im,headline,category,source_name,font_path,summary=summary)
+        story=render(im,headline,category,source_name,font_path,story=True,summary=summary)
+    def encode(im):
+        b=BytesIO()
+        im.save(b,format="JPEG",quality=91,optimize=True,subsampling=0)
+        return b.getvalue()
+    return encode(feed),encode(story)
