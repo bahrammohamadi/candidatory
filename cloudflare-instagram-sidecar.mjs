@@ -119,6 +119,8 @@ export function classifyForInstagram(caption) {
   if(!title)return null;
   // Only explicitly marked, sourced breaking reports receive the urgent red seal.
   if(/^(?:خبر فوری|فوری|BREAKING)(?:[:：\s]|$)/i.test(title))return "breaking";
+  // An incidental election reference does not turn an economy or diplomacy story into election coverage.
+  if(/^(?:قیمت|سوخت|بنزین|نفت|ارز|هدف مذاکرات|ادعاهای اخیر درباره|افزایش قیمت|کاهش قیمت|تورم)/.test(title))return "general";
   if(/جریمندرینگ|گزارش تحلیلی|راهنمای|چگونه|چطور|پیامدها|چه پیامدهایی|راستی\s*آزمایی|تحلیل|توضیحی|چه می‌شود|what if/i.test(title))
     return "analysis";
   if(/انتخابات|رأی\s*گیری|رای\s*گیری|نامزد|مجلس نمایندگان|کنگره|شورای شهر|انتخاباتی|electoral|election/i.test(title))
