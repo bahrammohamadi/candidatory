@@ -7,6 +7,7 @@ Fail closed if the title does not fit; verify rights before passing an image.
 from __future__ import annotations
 
 from io import BytesIO
+import base64
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageFilter, features
 
@@ -18,7 +19,7 @@ CREAM = "#F6F7FA"
 MUTED = "#D4DEED"
 HANDLE = "@candidatory.ir"
 BRAND = "کاندیداتوری"
-TEMPLATE_VERSION = "candidatory-editorial-v4"
+TEMPLATE_VERSION = "candidatory-editorial-v4-authentic-logo"
 
 def rtl(value: str) -> str:
     """Store Unicode in logical order; libraqm does shaping and bidi exactly once."""
@@ -64,12 +65,18 @@ def _fitted_lines(text, draw, font_path, *, max_width, max_lines, max_size, min_
             pass
     raise ValueError("Text too long: editorial shortening is required")
 
-def _brand_icon(draw, x, y, size):
-    """Native vector emblem; never display the generic ballot-box illustration."""
-    draw.rounded_rectangle((x, y, x+size, y+size), radius=size//5, fill=WHITE)
-    p=size//7
-    draw.rounded_rectangle((x+p, y+p, x+size-p, y+size-p), radius=size//7, fill=NAVY)
-    draw.polygon([(x+size-20,y+8),(x+size-8,y+8),(x+size-8,y+25)],fill=RED)
+def _brand_icon(canvas, draw, x, y, size):
+    """Use the real Instagram Candidatory profile emblem, versioned in assets."""
+    logo_path = Path(__file__).resolve().parent / "assets/candidatory-profile-logo.jpg.b64"
+    if not logo_path.exists():
+        raise FileNotFoundError("Authentic brand logo missing; publication forbidden")
+    logo_bytes = base64.b64decode(logo_path.read_text().strip(), validate=True)
+    with Image.open(BytesIO(logo_bytes)) as original:
+        logo = ImageOps.fit(original.convert("RGB"), (size,size), method=Image.Resampling.LANCZOS)
+    mask = Image.new("L", (size,size), 0)
+    ImageDraw.Draw(mask).ellipse((0,0,size-1,size-1),fill=255)
+    canvas.paste(logo,(x,y),mask)
+    draw.ellipse((x,y,x+size,y+size),outline=WHITE,width=3)
 
 def _photo_panel(canvas, source, left, top, right, bottom):
     pw, ph = right-left, bottom-top
@@ -107,7 +114,7 @@ def render(source: Image.Image, headline: str, category: str, source_name: str,
         header_y=236; photo_top=375; photo_end=1080
     else:
         header_y=37; photo_top=180; photo_end=819
-    _brand_icon(d,54,header_y,91)
+    _brand_icon(canvas,d,54,header_y,91)
     _right(d,1007,header_y+7,BRAND,_font(font_path,64),WHITE,max_width=600)
     d.text((160,header_y+77),"CANDIDATORY.IR",font=ImageFont.load_default(size=24),fill=MUTED)
 
