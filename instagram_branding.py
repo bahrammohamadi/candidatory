@@ -21,10 +21,11 @@ CATEGORY_STAMPS = {
     "breaking": {"label": "خبر فوری", "color": "#E31336"},
     "election": {"label": "خبر انتخاباتی", "color": "#1E63E9"},
     "analysis": {"label": "آموزشی / تحلیلی", "color": "#F39C12"},
+    "general": {"label": "خبر روز", "color": "#20A39E"},
 }
 HANDLE = "@candidatory.ir"
 BRAND = "کاندیداتوری"
-TEMPLATE_VERSION = "candidatory-editorial-v8-category-seals"
+TEMPLATE_VERSION = "candidatory-editorial-v9-all-news"
 
 def rtl(value: str) -> str:
     """Store Unicode in logical order; libraqm does shaping and bidi exactly once."""
@@ -117,7 +118,7 @@ def _headline(draw, headline, font_path, y, *, story=False):
 
 def _resolve_category_stamp(category):
     if category not in CATEGORY_STAMPS:
-        raise ValueError("Unsupported news category; expected breaking/election/analysis")
+        raise ValueError("Unsupported news category; expected breaking/election/analysis/general")
     return CATEGORY_STAMPS[category]
 
 
