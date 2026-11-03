@@ -7,6 +7,10 @@ test("news labels are conservative, disjoint and from approved branding",()=>{
  assert.equal(classifyForInstagram("انتخابات کنگره و رأی گیری"),"election");
  assert.equal(classifyForInstagram("پیروزی احتمالی چه پیامدهایی دارد؟"),"analysis");
  assert.equal(classifyForInstagram("گزارش درباره فوتبال لیگ"),null);
+ assert.equal(classifyForInstagram("قیمت بالای سوخت در روز انتخابات کنگره بیشتر شد"),null);
+ assert.equal(classifyForInstagram("هدف مذاکرات کنونی آمریکا با ایران / ترامپ در انتخابات شکست می‌خورد"),null);
+ assert.equal(classifyForInstagram("ادعاهای اخیر درباره افکارسنجی #انتخابات"),null);
+ assert.equal(classifyForInstagram("جریمندرینگ: مهندسی حوزه‌های رای‌گیری"),"analysis");
  assert.deepEqual(Object.keys(INSTAGRAM_CATEGORY_COLORS).sort(),["analysis","breaking","election"]);
 });
 test("queue only verified unposted source-image news and obeys cap",async()=>{
