@@ -186,7 +186,8 @@ export default {
     if (u.pathname === "/queue/status") {
       if (!env.NEWS_DB) return Response.json({error:"missing database"},{status:503});
       const all=await env.NEWS_DB.prepare("SELECT status,COUNT(*) AS count FROM instagram_scheduled_queue GROUP BY status").all().catch(()=>({results:[]}));
-      return Response.json({auto_publish:false,cron:"*/30 * * * *",categoryTemplate:"v8",statuses:all.results,missing:["CANDIDATORY_RENDERER","INSTAGRAM_SERVER_AUTH"]});
+      const last=await env.NEWS_DB.prepare("SELECT ran_at,telegram_seen,queued,error FROM instagram_scheduler_runs ORDER BY id DESC LIMIT 1").first().catch(()=>null);
+      return Response.json({auto_publish:false,cron:"*/30 * * * *",categoryTemplate:"v8",statuses:all.results,lastScheduledRun:last,missing:["CANDIDATORY_RENDERER","INSTAGRAM_SERVER_AUTH"]});
     }
     return new Response("Not Found", {status:404});
   },
@@ -197,7 +198,20 @@ export default {
       catch(e){console.error("Telegram read-only fetch failed",String(e).slice(0,180));}
     let queue={};try {queue=await queueEligibleTelegramNews(env.NEWS_DB)}
       catch(e){console.error("Instagram queue failed",String(e).slice(0,180));}
-    const legacy=await intake(env.NEWS_DB);
+    let legacy={};try {legacy=await intake(env.NEWS_DB)}
+      catch(e){console.warn("Legacy article intake failed",String(e).slice(0,180))}
+    try {
+      await env.NEWS_DB.prepare(`CREATE TABLE IF NOT EXISTS instagram_scheduler_runs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ran_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        telegram_seen INTEGER NOT NULL DEFAULT 0,
+        queued INTEGER NOT NULL DEFAULT 0,
+        error TEXT
+      )`).run();
+      await env.NEWS_DB.prepare(`INSERT INTO instagram_scheduler_runs(telegram_seen,queued,error)
+        VALUES(?,?,?)`).bind(Number(source.seen||0),Number(queue.queued||0),
+         source.seen ? null : "Telegram source unavailable").run();
+    } catch(e){console.error("Scheduler audit write failed",String(e).slice(0,180))}
     console.info("Cloudflare scheduling: intake+queue only; no Instagram publish",source,queue,legacy);
   }
 };
