@@ -1,0 +1,51 @@
+{
+  "profile_id": "candidatory-instagram",
+  "version": 6,
+  "status": "approved_for_single_test",
+  "format": {
+    "feed": [
+      1080,
+      1350
+    ],
+    "story": [
+      1080,
+      1920
+    ]
+  },
+  "fonts": {
+    "headline": {
+      "family": "B Titr",
+      "style": "Bold",
+      "role": [
+        "headline",
+        "masthead"
+      ],
+      "asset_env": "CANDIDATORY_BTITR_PATH",
+      "require_private_asset": true,
+      "source": "https://fontchi.com/fonts/btitr/"
+    },
+    "body": {
+      "family": "Vazirmatn",
+      "style": "Regular",
+      "role": [
+        "summary",
+        "source",
+        "date"
+      ],
+      "source": "https://github.com/rastikerdar/vazirmatn"
+    },
+    "labels": {
+      "family": "Vazirmatn",
+      "style": "Bold",
+      "role": [
+        "category",
+        "story_cta"
+      ]
+    }
+  },
+  "template": "candidatory-editorial-v6-b-titr-vazirmatn",
+  "layout_locked": true,
+  "never_publish_if_font_missing": true,
+  "news_source": "@candidatoryiran",
+  "instagram_account": "candidatory.ir"
+}
