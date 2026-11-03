@@ -87,7 +87,8 @@ class BrandingTests(unittest.TestCase):
         self.assertEqual(CATEGORY_STAMPS["breaking"]["color"], "#E31336")
         self.assertEqual(CATEGORY_STAMPS["election"]["color"], "#1E63E9")
         self.assertEqual(CATEGORY_STAMPS["analysis"]["color"], "#F39C12")
-        self.assertEqual(len({v["color"] for v in CATEGORY_STAMPS.values()}), 3)
+        self.assertEqual(CATEGORY_STAMPS["general"]["color"], "#20A39E")
+        self.assertEqual(len({v["color"] for v in CATEGORY_STAMPS.values()}), 4)
 
     def test_persian_is_not_double_reversed(self):
         # Critical regression: Pillow/libraqm owns RTL shaping and bidi reordering.
