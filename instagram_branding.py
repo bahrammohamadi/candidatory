@@ -19,7 +19,7 @@ CREAM = "#F6F7FA"
 MUTED = "#D4DEED"
 HANDLE = "@candidatory.ir"
 BRAND = "کاندیداتوری"
-TEMPLATE_VERSION = "candidatory-editorial-v6-b-titr-vazirmatn"
+TEMPLATE_VERSION = "candidatory-editorial-v7-news-type-polish"
 
 def rtl(value: str) -> str:
     """Store Unicode in logical order; libraqm does shaping and bidi exactly once."""
@@ -129,12 +129,12 @@ def render(source: Image.Image, headline: str, category: str, source_name: str,
         header_y=37; photo_top=180; photo_end=819
     _brand_icon(canvas,d,54,header_y,91)
     _right(d,1007,header_y+7,BRAND,_font(headline_font_path or font_path,64,700),WHITE,max_width=600)
-    d.text((160,header_y+77),"CANDIDATORY.IR",font=ImageFont.load_default(size=24),fill=MUTED)
+    d.text((160,header_y+77),"CANDIDATORY.IR",font=_font(font_path,24,550),fill=MUTED)
 
     _photo_panel(canvas,source,38,photo_top,1042,photo_end)
     d=ImageDraw.Draw(canvas)
     label=category.strip() or "خبر منتخب"
-    label_font=_font(font_path,33,700)
+    label_font=_font(font_path,35,700)
     badge_w=max(230,min(400,_width(d,label,label_font)+100))
     bx=1030-badge_w
     d.rounded_rectangle((bx,photo_top-32,1030,photo_top+59),radius=24,fill=RED,outline=WHITE,width=3)
@@ -145,10 +145,10 @@ def render(source: Image.Image, headline: str, category: str, source_name: str,
     d.rounded_rectangle((1022,title_start-3,1036,title_start+225),radius=7,fill=RED)
     last_title_y=_headline(d,headline,headline_font_path or font_path,title_start,story=story)
 
-    summary_y=max(last_title_y+28,1370 if story else 1074)
+    summary_y=max(last_title_y+10,1340 if story else 1053)
     if summary:
         lines,font=_fitted_lines(summary,d,font_path,max_width=944,max_lines=3 if story else 2,
-                                 max_size=34 if story else 30,min_size=25,weight=400)
+                                 max_size=37 if story else 33,min_size=29,weight=550)
         summary_height = len(lines)*(font.size+24)
         if story and summary_y+summary_height > 1520:
             raise ValueError("Story summary overlaps fixed source/CTA area")
@@ -160,13 +160,13 @@ def render(source: Image.Image, headline: str, category: str, source_name: str,
 
     if story:
         d.rounded_rectangle((64,1600,1016,1688),radius=27,fill=RED)
-        _right(d,971,1619,"خبر کامل در آخرین پست",_font(font_path,35,700),WHITE,max_width=875)
+        _right(d,971,1617,"خبر کامل در آخرین پست",_font(font_path,39,750),WHITE,max_width=875)
         footer_y=1540
     else:
         footer_y=1246
     d.rounded_rectangle((39,footer_y,1040,footer_y+65),radius=22,outline=MUTED,width=2)
-    d.text((61,footer_y+19),HANDLE,font=ImageFont.load_default(size=29),fill=WHITE)
-    _right(d,1009,footer_y+13,"منبع: "+source_name,_font(font_path,26,450),WHITE,max_width=550)
+    d.text((61,footer_y+17),HANDLE,font=_font(font_path,29,500),fill=WHITE)
+    _right(d,1009,footer_y+10,"منبع: "+source_name,_font(font_path,31,600),WHITE,max_width=550)
     return canvas
 
 def render_pair(image_bytes: bytes, headline: str, category: str,
