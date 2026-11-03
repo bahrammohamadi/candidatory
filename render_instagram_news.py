@@ -44,6 +44,7 @@ def main(argv=None):
     p.add_argument("--headline", required=True)
     p.add_argument("--source", required=True)
     p.add_argument("--category", default="خبر منتخب")
+    p.add_argument("--summary", default=None)
     p.add_argument("--font")
     p.add_argument("--output-dir", required=True)
     args=p.parse_args(argv)
@@ -52,7 +53,7 @@ def main(argv=None):
     source=Path(args.photo)
     if not source.is_file() or source.stat().st_size > 15_000_000:
         raise SystemExit("Missing or oversized licensed image")
-    feed,story=render_pair(source.read_bytes(),args.headline,args.category,args.source,resolve_font(args.font))
+    feed,story=render_pair(source.read_bytes(),args.headline,args.category,args.source,resolve_font(args.font),summary=args.summary)
     output=Path(args.output_dir);output.mkdir(parents=True,exist_ok=True)
     (output/"feed.jpg").write_bytes(feed)
     (output/"story.jpg").write_bytes(story)
