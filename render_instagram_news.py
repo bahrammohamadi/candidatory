@@ -13,6 +13,7 @@ import os
 import tempfile
 from pathlib import Path
 from urllib.request import Request, urlopen
+from PIL import ImageFont
 
 from instagram_branding import render_pair
 
@@ -27,6 +28,9 @@ def resolve_font(path: str | None, *, headline: bool=False) -> str:
         approved = path or os.getenv(HEADLINE_FONT_ENV)
         if not approved or not Path(approved).is_file():
             raise FileNotFoundError("B Titr Bold missing: supply --headline-font or CANDIDATORY_BTITR_PATH")
+        family, style = ImageFont.truetype(approved, 24).getname()
+        if "b titr" not in family.lower():
+            raise ValueError("Headline font is not B Titr: " + family)
         return approved
     if path:
         if not Path(path).is_file():
