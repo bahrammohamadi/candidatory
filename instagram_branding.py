@@ -2,15 +2,13 @@
 
 Render only verified news and licensed/authorized source images.
 No network calls or automatic publishing occur in this module.
-Requires Pillow, arabic-reshaper, python-bidi and a licensed Persian TTF font.
+Requires Pillow with libraqm and a licensed Persian TTF font.
 """
 from __future__ import annotations
 
 from io import BytesIO
 from pathlib import Path
-from PIL import Image, ImageDraw, ImageFont, ImageOps
-import arabic_reshaper
-from bidi.algorithm import get_display
+from PIL import Image, ImageDraw, ImageFont, ImageOps, features
 
 NAVY = "#10234A"
 RED = "#D80D2C"
@@ -18,11 +16,12 @@ WHITE = "#FFFFFF"
 LIGHT = "#F0F3FA"
 HANDLE = "@candidatory.ir"
 BRAND = "کاندیداتوری"
-TEMPLATE_VERSION = "candidatory-editorial-v2"
+TEMPLATE_VERSION = "candidatory-editorial-v3-raqm"
 
 
 def rtl(value: str) -> str:
-    return get_display(arabic_reshaper.reshape(str(value)))
+    """Keep logical Unicode order; libraqm performs shaping once during draw."""
+    return str(value)
 
 
 def _font(path: str, size: int) -> ImageFont.FreeTypeFont:
@@ -31,29 +30,33 @@ def _font(path: str, size: int) -> ImageFont.FreeTypeFont:
     return ImageFont.truetype(path, size)
 
 
+def _width(draw, content, font):
+    bbox = draw.textbbox((0, 0), content, font=font, direction="rtl")
+    return bbox[2] - bbox[0]
+
+
 def _wrap(text: str, draw: ImageDraw.ImageDraw, font, max_width: int, limit: int = 3):
-    words = text.split()
+    words = str(text).split()
     lines, current = [], ""
     for word in words:
-        candidate = f"{current} {word}".strip()
-        if current and draw.textbbox((0, 0), rtl(candidate), font=font)[2] > max_width:
+        candidate = (current + " " + word).strip()
+        if current and _width(draw, candidate, font) > max_width:
             lines.append(current)
             current = word
         else:
             current = candidate
     if current:
         lines.append(current)
-    if len(lines) > limit:
-        lines = lines[:limit]
-        lines[-1] = lines[-1].rstrip("…") + "…"
+    if len(lines) > limit or any(_width(draw, line, font) > max_width for line in lines):
+        raise ValueError("Headline does not fit the approved template")
     return lines
 
 
 def _right(draw, x, y, label, font, fill, max_width=None):
-    shaped = rtl(label)
-    if max_width and draw.textbbox((0, 0), shaped, font=font)[2] > max_width:
+    label = rtl(label)
+    if max_width and _width(draw, label, font) > max_width:
         raise ValueError("Text exceeds available width")
-    draw.text((x, y), shaped, font=font, fill=fill, anchor="ra")
+    draw.text((x, y), label, font=font, fill=fill, anchor="ra", direction="rtl")
 
 
 def _base(source: Image.Image, size: tuple[int, int], is_story: bool):
@@ -78,11 +81,12 @@ def render(source: Image.Image, headline: str, category: str, source_name: str, 
     """Use one editorial layout for both outputs; the input must be source-verified."""
     if not headline.strip() or not source_name.strip():
         raise ValueError("A sourced headline and publisher are required")
+    if not features.check("raqm"):
+        raise RuntimeError("Pillow must support libraqm for Persian text")
     w, h = (1080, 1920) if story else (1080, 1350)
     canvas, draw, lower = _base(source, (w, h), story)
     brand_font = _font(font_path, 65)
     label_font = _font(font_path, 32)
-    title_font = _font(font_path, 55 if story else 61)
     small_font = _font(font_path, 27)
     # Clear cream banner below story controls, with brand mark at a fixed position.
     banner_top = 230 if story else 22
@@ -91,25 +95,38 @@ def render(source: Image.Image, headline: str, category: str, source_name: str, 
     draw.rounded_rectangle((55, banner_top + 26, 147, banner_top + 106), radius=16, outline=RED, width=7)
     draw.line(((72, banner_top + 68), (92, banner_top + 86), (129, banner_top + 43)), fill=RED, width=9)
     _right(draw, w - 65, banner_top + 30, BRAND, brand_font, NAVY)
-    draw.text((46, banner_bottom + 14), HANDLE, font=small_font, fill=LIGHT)
+    draw.text((46, banner_bottom + 14), HANDLE, font=ImageFont.load_default(size=29), fill=LIGHT)
     label = category.strip() or "خبر منتخب"
     draw.rounded_rectangle((w - 378, lower - 54, w - 50, lower + 15), radius=18, fill=RED)
     _right(draw, w - 72, lower - 42, label, label_font, WHITE)
     y = lower + 70
-    lines = _wrap(headline, draw, title_font, w - 138, limit=3)
+    lines = None
+    title_font = None
+    for size in range(57 if not story else 54, 37, -2):
+        candidate_font = _font(font_path, size)
+        try:
+            candidate_lines = _wrap(headline, draw, candidate_font, w - 138, limit=3 if story else 2)
+        except ValueError:
+            continue
+        lines, title_font = candidate_lines, candidate_font
+        break
+    if lines is None:
+        raise ValueError("Headline too long: shorten it before publishing")
     for line in lines:
         _right(draw, w - 65, y, line, title_font, WHITE)
-        y += 93 if story else 88
+        y += 91 if story else 88
     # Always show attribution and a clear editorial footer.
     if story:
-        _right(draw, w - 68, 1470, "منبع: " + source_name, small_font, LIGHT)
+        _right(draw, w - 68, 1470, "منبع", small_font, LIGHT)
+        _right(draw, w - 180, 1470, source_name, small_font, LIGHT)
         draw.rounded_rectangle((78, 1540, w - 78, 1635), radius=25, fill=RED)
         _right(draw, w - 126, 1560, "خبر کامل در آخرین پست", label_font, WHITE)
         # The final 285px stay clear for Instagram's reply controls.
     else:
-        _right(draw, w - 65, h - 115, "منبع: " + source_name, small_font, LIGHT)
+        _right(draw, w - 65, h - 115, "منبع", small_font, LIGHT)
+        _right(draw, w - 175, h - 115, source_name, small_font, LIGHT)
         draw.line((40, h - 67, w - 40, h - 67), fill=RED, width=4)
-        draw.text((45, h - 57), HANDLE, font=small_font, fill=WHITE)
+        draw.text((45, h - 57), HANDLE, font=ImageFont.load_default(size=29), fill=WHITE)
     return canvas
 
 
