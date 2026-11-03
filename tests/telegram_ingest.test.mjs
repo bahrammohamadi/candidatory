@@ -16,10 +16,10 @@ test("parse ids, attribution and media in newest-first order",()=>{
  assert.equal(p[0].photo_url,"https://cdn4.telesco.pe/file/photo02.jpg");
  assert.match(p[1].caption,/خبر & متن/);
 });
-test("sync is idempotent via INSERT OR IGNORE",async()=>{
+test("sync reconciles photo and timestamp without changing publication status",async()=>{
  let inserted=0;
  const db={prepare(sql){
-   return {bind(...a){return this},async run(){if(sql.includes("INSERT OR IGNORE")) inserted++;return {meta:{changes:1}}}};
+   return {bind(...a){return this},async run(){if(sql.includes("ON CONFLICT(telegram_message_id)")) inserted++;return {meta:{changes:1}}}};
  }};
  const fake=async()=>({ok:true,text:async()=>HTML});
  const v=await syncTelegramChannel(db,fake);
