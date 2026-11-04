@@ -154,6 +154,20 @@ def source_name(text):
     return m.group(1).strip() if m else None
 
 
+def summary_from_caption(text, title):
+    """Use only verbatim source-caption prose; never invent a summary."""
+    for line in str(text).splitlines():
+        value = line.strip().strip(" \u200c🔴🔵🟠📰💠🇮🇷▫️•")
+        if not value or value==title or value.startswith(("#","@","کانال خبری","منبع:")):
+            continue
+        if len(value) < 25 or value.lower() in ("mehr","isna","irna","entekhab"):
+            continue
+        if len(value) > 105:
+            value=value[:105].rsplit(" ",1)[0]
+        return value
+    return None
+
+
 def eligible(item, state, *, max_hours=18):
     if str(item["id"]) in state["posts"]:
         return False
@@ -232,8 +246,16 @@ def publish(item, state, *, dry_run=False):
     photo = download_image(item["image_url"])
     body_font, heading_font = verified_fonts()
     # Avoid invented summaries: source caption becomes Instagram caption; graphics carry title.
-    feed, story = render_pair(photo, title, category, source, body_font,
-                              headline_font_path=heading_font, summary=None)
+    description = summary_from_caption(item["text"], title)
+    try:
+        feed, story = render_pair(photo, title, category, source, body_font,
+                                  headline_font_path=heading_font, summary=description)
+    except ValueError as exc:
+        if not description or "summary" not in str(exc).lower():
+            raise
+        # Fail safely to title-only layout rather than allowing clipped Persian text.
+        feed, story = render_pair(photo, title, category, source, body_font,
+                                  headline_font_path=heading_font, summary=None)
     ASSET_DIR.mkdir(parents=True, exist_ok=True)
     feed_path = ASSET_DIR / f"{item['id']}-feed.jpg"
     story_path = ASSET_DIR / f"{item['id']}-story.jpg"
