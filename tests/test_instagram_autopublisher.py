@@ -51,8 +51,9 @@ class AutonomousNewsTests(unittest.TestCase):
 
     def test_requires_private_server_credentials(self):
         with patch.dict("os.environ",{"INSTAGRAM_AUTOPUBLISH_ENABLED":"false"},clear=True):
-            with patch.object(publisher.SESSION,"get",side_effect=AssertionError("must not access feed")):
-                self.assertEqual(publisher.main(),0)
+            with patch("sys.argv",["autopublisher"]):
+                with patch.object(publisher.SESSION,"get",side_effect=AssertionError("must not access feed")):
+                    self.assertEqual(publisher.main(),0)
 
 
 if __name__=="__main__":
