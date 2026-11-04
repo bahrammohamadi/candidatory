@@ -190,11 +190,11 @@ export async function reconcilePublishedState(db, fetchImpl=fetch) {
     throw new Error("Unexpected Instagram account state");
   let synced=0;
   for(const [id,entry] of Object.entries(payload.posts)) {
-    if(!/^\\d+$/.test(id) || !entry || typeof entry!=="object")continue;
+    if(!/^\d+$/.test(id) || !entry || typeof entry!=="object")continue;
     const feed=String(entry.feed_media_id||"");
     const story=String(entry.story_media_id||"");
-    if(!/^\\d+$/.test(feed))continue;
-    const completed=entry.status==="completed" && /^\\d+$/.test(story);
+    if(!/^\d+$/.test(feed))continue;
+    const completed=entry.status==="completed" && /^\d+$/.test(story);
     const status=completed?"completed":"feed_published";
     await db.prepare(`UPDATE instagram_telegram_posts
       SET status=?,feed_media_id=?,story_media_id=COALESCE(?,story_media_id),last_error=NULL
