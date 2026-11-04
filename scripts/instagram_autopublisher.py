@@ -115,7 +115,7 @@ def headline(text):
 
 def classify(text):
     title = headline(text) or ""
-    if re.match(r"^(?:خبر فوری|فوری|BREAKING)\b", title, re.I):
+    if re.search(r"(?:^|\\n)\\s*(?:خبر فوری|فوری|BREAKING)\\s*[:：\\s]", text, re.I):
         return "breaking"
     if re.search(r"تحلیل|راهنما|جریمندرینگ|چگونه|پیامدها|راستی\s*آزمایی", title):
         return "analysis"
@@ -301,6 +301,34 @@ def main():
     if not ready and not opts.dry_run:
         print("BLOCKED: missing server authorization or INSTAGRAM_AUTOPUBLISH_ENABLED; no publication")
         return 0
+    # Even with credentials, publish at most 15/day in the Tehran news cycle.
+    # Keep a minimum interval to spread posts instead of flooding users.
+    if not opts.dry_run:
+        from zoneinfo import ZoneInfo
+        now = utcnow()
+        tehran = now.astimezone(ZoneInfo("Asia/Tehran"))
+        if not 9 <= tehran.hour < 23:
+            print("OUTSIDE_TEHRAN_POSTING_WINDOW: no publication")
+            return 0
+        today = tehran.date()
+        published_today = []
+        for rec in state["posts"].values():
+            stamp = rec.get("created_at")
+            if not stamp or not rec.get("feed_media_id"):
+                continue
+            try:
+                when = dt.datetime.fromisoformat(stamp.replace("Z","+00:00"))
+                if when.astimezone(ZoneInfo("Asia/Tehran")).date() == today:
+                    published_today.append(when)
+            except ValueError:
+                pass
+        cap = max(1,min(15,int(os.getenv("CANDIDATORY_MAX_DAILY_POSTS","15"))))
+        if len(published_today) >= cap:
+            print("DAILY_POST_CAP_REACHED")
+            return 0
+        if published_today and (now - max(published_today)).total_seconds() < 50*60:
+            print("MINIMUM_POST_INTERVAL_ACTIVE")
+            return 0
     response = SESSION.get(CHANNEL, timeout=25)
     response.raise_for_status()
     candidates = parse_posts(response.text)
