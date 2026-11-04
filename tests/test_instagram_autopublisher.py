@@ -31,7 +31,7 @@ class AutonomousNewsTests(unittest.TestCase):
         self.assertEqual(publisher.source_name("خبر مهم\n📰\nEntekhab"),"انتخاب")
 
     def test_rejects_duplicated_or_unsourced_items(self):
-        item={"id":5001,"text":"💠\nخبر اقتصادی\n📰\nMehr",
+        item={"id":5001,"text":"💠\nگزارش جدید اقتصاد ایران\n📰\nMehr",
               "image_url":"https://example.com/photo.jpg","posted_at":publisher.utcnow(),
               "telegram_url":"https://t.me/candidatoryiran/5001"}
         self.assertFalse(publisher.eligible(item,{"posts":{"5001":{"status":"completed"}}}))
