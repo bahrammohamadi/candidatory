@@ -20,6 +20,7 @@ concurrency:
 
 jobs:
   post_verified_news:
+    if: \${{ github.event_name == 'workflow_dispatch' || vars.CANDIDATORY_INSTAGRAM_AUTOPUBLISH_ENABLED == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 18
     env:
