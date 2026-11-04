@@ -223,7 +223,9 @@ export default {
       ok: true, worker: "candidatory-instagram-staging",
       telegram_source: CHANNEL, instagram_destination: IG,
       auto_publish: false,
-      reason: "requires approved renderer, media hosting and server-side Composio authorization"
+      publishing_runtime: "github-actions",
+      publishing_schedule: "7,37 * * * *",
+      reason: "Cloudflare collects and reconciles; separate GitHub Actions publisher is disabled by default until server credentials are configured"
     });
     if (u.pathname === "/channel/probe") {
       try { const r=await fetch(PUBLIC_CHANNEL,{cf:{cacheTtl:300,cacheEverything:true}});const p=parseTelegramPublicFeed(await r.text());return Response.json({http:r.status,messages:p.length,latest:p[0]?.telegram_message_id||null}); } catch(e){return Response.json({error:String(e).slice(0,100)},{status:502});}
@@ -232,7 +234,7 @@ export default {
       if (!env.NEWS_DB) return Response.json({error:"missing database"},{status:503});
       const all=await env.NEWS_DB.prepare("SELECT status,COUNT(*) AS count FROM instagram_scheduled_queue GROUP BY status").all().catch(()=>({results:[]}));
       const last=await env.NEWS_DB.prepare("SELECT ran_at,telegram_seen,queued,error FROM instagram_scheduler_runs ORDER BY id DESC LIMIT 1").first().catch(()=>null);
-      return Response.json({auto_publish:false,cron:"*/30 * * * *",categoryTemplate:"v9",statuses:all.results,lastScheduledRun:last,missing:["CANDIDATORY_RENDERER","INSTAGRAM_SERVER_AUTH"]});
+      return Response.json({cloudflare_auto_publish:false,github_actions_publisher:"configured_disabled_by_default",cron:"*/30 * * * *",github_cron:"7,37 * * * *",categoryTemplate:"v9",statuses:all.results,lastScheduledRun:last,requiredGithubSecrets:["CANDIDATORY_COMPOSIO_API_KEY","CANDIDATORY_COMPOSIO_INSTAGRAM_CONNECTED_ACCOUNT_ID"],requiredGithubVariable:"CANDIDATORY_INSTAGRAM_AUTOPUBLISH_ENABLED"});
     }
     return new Response("Not Found", {status:404});
   },
