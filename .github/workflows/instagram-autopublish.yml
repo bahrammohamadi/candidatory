@@ -1,0 +1,75 @@
+name: Candidatory Instagram autonomous publisher
+
+on:
+  schedule:
+    - cron: '7,37 * * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build one test image but never publish"
+        type: boolean
+        required: false
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: candidatory-instagram-autopublisher
+  cancel-in-progress: false
+
+jobs:
+  post_verified_news:
+    runs-on: ubuntu-latest
+    timeout-minutes: 18
+    env:
+      COMPOSIO_API_KEY: ${{ secrets.CANDIDATORY_COMPOSIO_API_KEY }}
+      COMPOSIO_INSTAGRAM_CONNECTED_ACCOUNT_ID: ${{ secrets.CANDIDATORY_COMPOSIO_INSTAGRAM_CONNECTED_ACCOUNT_ID }}
+      INSTAGRAM_AUTOPUBLISH_ENABLED: ${{ vars.CANDIDATORY_INSTAGRAM_AUTOPUBLISH_ENABLED }}
+      VAZIRMATN_PATH: /tmp/candidatory-fonts/Vazirmatn.ttf
+      CANDIDATORY_BTITR_PATH: /tmp/candidatory-fonts/BTITRBD.TTF
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: |
+          python -m pip install --disable-pip-version-check --quiet \
+            'Pillow>=10.4,<13' 'requests>=2.32,<3' 'beautifulsoup4>=4.12,<5'
+      - name: Install approved fonts privately
+        run: |
+          mkdir -p /tmp/candidatory-fonts
+          python - <<'PY'
+          import io
+          import pathlib
+          import requests
+          import zipfile
+          from PIL import ImageFont
+          root=pathlib.Path('/tmp/candidatory-fonts')
+          font_url='https://raw.githubusercontent.com/google/fonts/main/ofl/vazirmatn/Vazirmatn%5Bwght%5D.ttf'
+          resp=requests.get(font_url,timeout=25);resp.raise_for_status()
+          (root/'Vazirmatn.ttf').write_bytes(resp.content)
+          # The font is fetched for runtime use only. Never committed or shared.
+          archive=requests.get('https://dl.fontchi.com/fonts/b-series/Btitr.zip',timeout=25)
+          archive.raise_for_status()
+          with zipfile.ZipFile(io.BytesIO(archive.content)) as zf:
+              (root/'BTITRBD.TTF').write_bytes(zf.read('Btitr/BTITRBD.TTF'))
+          family=ImageFont.truetype(root/'BTITRBD.TTF',20).getname()[0]
+          if 'titr' not in family.lower():
+              raise RuntimeError('Downloaded file is not the approved B Titr font')
+          print('Fonts verified; files remain outside the repository')
+          PY
+      - name: Configure Git author
+        run: |
+          git config user.name 'candidatory-news-bot'
+          git config user.email 'actions@users.noreply.github.com'
+      - name: Build only (manual dry run)
+        if: github.event_name == 'workflow_dispatch' && inputs.dry_run
+        run: python scripts/instagram_autopublisher.py --dry-run
+      - name: Run authenticated publisher
+        if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && !inputs.dry_run)
+        run: python scripts/instagram_autopublisher.py
