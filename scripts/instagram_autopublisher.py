@@ -23,9 +23,10 @@ from urllib.parse import quote
 import requests
 from bs4 import BeautifulSoup
 from PIL import Image, ImageFont
-from instagram_branding import render_pair
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from instagram_branding import render_pair
 STATE_FILE = ROOT / "data" / "instagram-published.json"
 ASSET_DIR = ROOT / "instagram-media"
 CHANNEL = "https://t.me/s/candidatoryiran"
