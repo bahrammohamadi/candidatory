@@ -99,41 +99,62 @@ def parse_posts(html):
     return sorted(items, key=lambda row: row["id"], reverse=True)
 
 
+def headline(text):
+    """Use first meaningful Telegram line, never a decorative emoji line."""
+    for line in str(text).splitlines():
+        value = line.strip().strip(" \u200c🔴🔵🟠📰💠🇮🇷▫️•")
+        value = re.sub(r"^[^\w\u0600-\u06FF]+", "", value).strip()
+        if not value or value.startswith(("#", "@", "کانال خبری", "منبع:")):
+            continue
+        value = re.sub(r"^(?:خبر فوری|فوری)\s*[:：]\s*", "", value)
+        value = re.split(r"[#@]|\s+\|\s+", value)[0].strip()
+        if 14 <= len(value) <= 160:
+            return value
+    return None
+
+
 def classify(text):
-    heading = text.split("\n")[0].strip(" \n\u200c🔴🔵🟠📰")
-    if re.match(r"^(?:خبر فوری|فوری|BREAKING)\b", heading, re.I):
+    title = headline(text) or ""
+    if re.match(r"^(?:خبر فوری|فوری|BREAKING)\b", title, re.I):
         return "breaking"
-    if re.search(r"تحلیل|راهنما|جریمندرینگ|چگونه|پیامدها|راستی\s*آزمایی", heading):
+    if re.search(r"تحلیل|راهنما|جریمندرینگ|چگونه|پیامدها|راستی\s*آزمایی", title):
         return "analysis"
-    if re.search(r"انتخابات|رأی\s*گیری|رای\s*گیری|کنگره|شورای شهر", heading):
-        if re.match(r"^(?:قیمت|سوخت|بنزین|نفت|ارز|هدف مذاکرات)", heading):
-            return "general"
+    if re.match(r"^(?:قیمت|سوخت|بنزین|نفت|ارز|هدف مذاکرات)", title):
+        return "general"
+    if re.search(r"انتخابات|رأی\s*گیری|رای\s*گیری|کنگره|شورای شهر", title):
         return "election"
     return "general"
 
 
 def source_name(text):
-    mapping = (("خبرگزاری مهر", "مهر"), ("به گزارش مهر", "مهر"),
-               ("ایسنا", "ایسنا"), ("ایرنا", "ایرنا"), ("انتخاب", "انتخاب"),
-               ("باشگاه خبرنگاران", "باشگاه خبرنگاران جوان"),
-               ("همشهری", "همشهری"), ("گاردین", "گاردین"))
-    for needle, name in mapping:
-        if needle in text:
+    """Publisher names must come from the caption's source marker."""
+    normalized = str(text).replace("\u200c", " ")
+    lines = [x.strip(" \u200c▫️•📰") for x in normalized.splitlines()]
+    labels = {
+        "Mehr": "مهر", "ISNA": "ایسنا", "IRNA": "ایرنا",
+        "Entekhab": "انتخاب", "Guardian": "گاردین",
+        "YJC": "باشگاه خبرنگاران جوان",
+    }
+    for line in lines:
+        if line in labels:
+            return labels[line]
+    patterns = [
+        (r"خبرگزاری\s+مهر|به گزارش\s+مهر", "مهر"),
+        (r"\bایسنا\b", "ایسنا"),
+        (r"\bایرنا\b", "ایرنا"),
+        (r"\bانتخاب\b(?!ات)", "انتخاب"),
+        (r"\bباشگاه خبرنگاران(?: جوان)?\b", "باشگاه خبرنگاران جوان"),
+        (r"\bهمشهری\b", "همشهری"),
+        (r"\bگاردین\b", "گاردین"),
+    ]
+    for pattern, name in patterns:
+        if re.search(pattern, normalized):
             return name
-    m = re.search(r"(?:منبع\s*[:：]|به گزارش)\s*([^\n،؛]{3,42})", text)
+    m = re.search(r"(?:منبع\s*[:：]|به گزارش)\s*([^\n،؛]{3,42})", normalized)
     return m.group(1).strip() if m else None
 
 
-def headline(text):
-    value = re.sub(r"^[^\w\u0600-\u06FF]+", "", text.split("\n")[0]).strip()
-    value = re.sub(r"^(?:خبر فوری|فوری)\s*[:：]\s*", "", value)
-    value = re.split(r"[#@]|\s+\|\s+", value)[0].strip()
-    if not 14 <= len(value) <= 160:
-        return None
-    return value
-
-
-def eligible(item, state, *, max_hours=8):
+def eligible(item, state, *, max_hours=18):
     if str(item["id"]) in state["posts"]:
         return False
     if not item["image_url"].startswith("https://"):
