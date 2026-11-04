@@ -178,6 +178,44 @@ export async function queueEligibleTelegramNews(db, {maxNew=4}={}) {
   return {inspected:(rows.results||[]).length,eligible,queued:added,publishEnabled:false};
 }
 
+/** Reconcile immutable published IDs written by the independently scheduled
+ * GitHub Actions renderer/publisher. Never claim published from a container ID.
+ */
+const GITHUB_PUBLICATION_STATE="https://raw.githubusercontent.com/bahrammohamadi/candidatory/main/data/instagram-published.json";
+export async function reconcilePublishedState(db, fetchImpl=fetch) {
+  const response=await fetchImpl(GITHUB_PUBLICATION_STATE,{cf:{cacheTtl:60,cacheEverything:true}});
+  if(!response.ok)throw new Error("Publication state HTTP "+response.status);
+  const payload=await response.json();
+  if(payload.account!=="candidatory.ir" || typeof payload.posts!=="object")
+    throw new Error("Unexpected Instagram account state");
+  let synced=0;
+  for(const [id,entry] of Object.entries(payload.posts)) {
+    if(!/^\\d+$/.test(id) || !entry || typeof entry!=="object")continue;
+    const feed=String(entry.feed_media_id||"");
+    const story=String(entry.story_media_id||"");
+    if(!/^\\d+$/.test(feed))continue;
+    const completed=entry.status==="completed" && /^\\d+$/.test(story);
+    const status=completed?"completed":"feed_published";
+    await db.prepare(`UPDATE instagram_telegram_posts
+      SET status=?,feed_media_id=?,story_media_id=COALESCE(?,story_media_id),last_error=NULL
+      WHERE telegram_message_id=? AND (feed_media_id IS NULL OR feed_media_id=?)`)
+      .bind(status,feed,completed?story:null,Number(id),feed).run();
+    await db.prepare(`UPDATE instagram_scheduled_queue
+      SET status=?,feed_media_id=?,story_media_id=COALESCE(?,story_media_id),
+      updated_at=CURRENT_TIMESTAMP
+      WHERE telegram_message_id=? AND (feed_media_id IS NULL OR feed_media_id=?)`)
+      .bind(status,feed,completed?story:null,Number(id),feed).run();
+    if(entry.category && entry.feed_permalink && ["breaking","election","analysis","general"].includes(entry.category)){
+      await db.prepare(`INSERT OR IGNORE INTO instagram_category_publications
+        (telegram_message_id,category_id,template_id,feed_media_id,permalink)
+        VALUES(?,?,?,?,?)`).bind(Number(id),entry.category,
+         entry.template||"candidatory-editorial-v9-all-news",feed,entry.feed_permalink).run();
+    }
+    synced++;
+  }
+  return {synced};
+}
+
 export default {
   async fetch(request, env) {
     const u = new URL(request.url);
@@ -205,6 +243,8 @@ export default {
       catch(e){console.error("Telegram read-only fetch failed",String(e).slice(0,180));}
     let queue={};try {queue=await queueEligibleTelegramNews(env.NEWS_DB)}
       catch(e){console.error("Instagram queue failed",String(e).slice(0,180));}
+    let reconciled={};try {reconciled=await reconcilePublishedState(env.NEWS_DB)}
+      catch(e){console.warn("Published state reconciliation failed",String(e).slice(0,180))}
     let legacy={};try {legacy=await intake(env.NEWS_DB)}
       catch(e){console.warn("Legacy article intake failed",String(e).slice(0,180))}
     try {
@@ -219,6 +259,6 @@ export default {
         VALUES(?,?,?)`).bind(Number(source.seen||0),Number(queue.queued||0),
          source.seen ? null : "Telegram source unavailable").run();
     } catch(e){console.error("Scheduler audit write failed",String(e).slice(0,180))}
-    console.info("Cloudflare scheduling: intake+queue only; no Instagram publish",source,queue,legacy);
+    console.info("Cloudflare scheduling: intake+queue+publication reconciliation; no direct Instagram publish",source,queue,reconciled,legacy);
   }
 };
