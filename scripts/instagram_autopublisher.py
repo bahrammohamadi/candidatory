@@ -115,7 +115,7 @@ def headline(text):
 
 def classify(text):
     title = headline(text) or ""
-    if re.search(r"(?:^|\\n)\\s*(?:خبر فوری|فوری|BREAKING)\\s*[:：\\s]", text, re.I):
+    if re.search(r"(?:^|\n)\s*(?:خبر فوری|فوری|BREAKING)\s*[:：\s]", text, re.I):
         return "breaking"
     if re.search(r"تحلیل|راهنما|جریمندرینگ|چگونه|پیامدها|راستی\s*آزمایی", title):
         return "analysis"
