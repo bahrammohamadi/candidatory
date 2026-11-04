@@ -1,0 +1,48 @@
+{
+  "version": 1,
+  "initial_import_at": "2026-11-04",
+  "account": "candidatory.ir",
+  "posts": {
+    "4014": {
+      "status": "completed",
+      "category": "election",
+      "feed_media_id": "18155543434548921",
+      "story_media_id": "18494310724111588"
+    },
+    "4015": {
+      "status": "completed",
+      "category": "analysis",
+      "feed_media_id": "17952022482056323",
+      "story_media_id": "18164892007490996"
+    },
+    "4016": {
+      "status": "completed",
+      "category": "general",
+      "feed_media_id": "18156540070477277",
+      "story_media_id": "17940233280122233"
+    },
+    "4017": {
+      "status": "completed",
+      "category": "election",
+      "feed_media_id": "18129759553637515",
+      "story_media_id": "18081977429547931"
+    },
+    "4018": {
+      "status": "completed",
+      "category": "analysis",
+      "feed_media_id": "18340546123272650",
+      "story_media_id": "17977970919170560"
+    },
+    "4020": {
+      "status": "feed_verified",
+      "category": "election",
+      "feed_media_id": "18134089417747759"
+    },
+    "4022": {
+      "status": "completed",
+      "category": "breaking",
+      "feed_media_id": "18147353479583463",
+      "story_media_id": "18097781549558643"
+    }
+  }
+}
