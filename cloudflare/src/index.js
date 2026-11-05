@@ -1,5 +1,5 @@
 function fixEncoding(s){if(!/[ØÙÛÃ]/.test(s))return s;try{const bytes=Uint8Array.from([...s].map(ch=>ch.charCodeAt(0)&255));const t=new TextDecoder('utf-8',{fatal:true}).decode(bytes);return /[\u0600-\u06ff]/.test(t)?t:s}catch{return s}}
-const FEEDS=[["ISNA","https://www.isna.ir/rss"],["Mehr","https://www.mehrnews.com/rss"],["BBCPersian","https://feeds.bbci.co.uk/persian/rss.xml"]]; // Unreachable feeds removed until verified
+const FEEDS=[["ISNA","https://www.isna.ir/rss"],["Mehr","https://www.mehrnews.com/rss"]]; // BBC Persian excluded by editorial policy
 const KEYWORDS=[/انتخابات/i,/انتخاباتی/i,/نامزد/i,/کاندیدا/i,/رای.?گیری/i,/رأی.?گیری/i,/صلاحیت/i,/شورای شهر/i,/شوراهای اسلامی/i,/election/i,/candidate/i];
 const LOCAL_ELECTION=/انتخابات (شورا|مجلس|ریاست.?جمهوری|خبرگان)|شوراهای اسلامی|شورای (اسلامی|شهر|روستا)|ستاد انتخابات|هیئت اجرایی انتخابات|صلاحیت (داوطلبان|نامزدها)|ثبت.?نام (داوطلبان|نامزدها)|کاندیداتوری|نامزدهای انتخابات|فرایند انتخابات/i;
 const REJECT=[/فوتبال/i,/رمزارز/i,/آشپزی/i,/سریال تلویزیونی/i];
@@ -45,7 +45,7 @@ function escapeHtml(s){return String(s??'').replace(/&/g,'&amp;').replace(/</g,'
 function getMeta(html,key){const tags=html.match(/<meta\b[^>]*>/gi)||[];for(const t of tags){const attrs={};for(const m of t.matchAll(/([\w:-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g))attrs[m[1].toLowerCase()]=m[2]??m[3];if(attrs.property===key||attrs.name===key)return attrs.content||''}return ''}
 function cleanSummary(s){return fixEncoding(String(s||'').replace(/<[^>]*>/g,' ').replace(/&amp;/g,'&').replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/\s+/g,' ').trim())}
 async function publishOne(env){
- const row=await env.NEWS_DB.prepare("SELECT id,title,url,source FROM articles WHERE status='pending_review' ORDER BY created_at ASC LIMIT 1").first();
+ const row=await env.NEWS_DB.prepare("SELECT id,title,url,source FROM articles WHERE status='pending_review' AND source NOT IN ('BBCPersian','BBC Persian') AND url NOT LIKE '%bbc.com/persian%' AND url NOT LIKE '%bbci.co.uk/persian%' ORDER BY created_at ASC LIMIT 1").first();
  if(!row)return;
  const previous=await env.NEWS_DB.prepare("SELECT title,url FROM articles WHERE status IN ('published','published_legacy') AND created_at >= datetime('now','-7 days') ORDER BY created_at DESC LIMIT 400").all();
  if((previous.results||[]).some(x=>canonicalNewsUrl(x.url)===canonicalNewsUrl(row.url)||normalizedHeadline(x.title)===normalizedHeadline(row.title)||similarity(x.title,row.title)>=0.82)){await env.NEWS_DB.prepare("UPDATE articles SET status='duplicate' WHERE id=?").bind(row.id).run();return}
@@ -289,7 +289,7 @@ async function specialGemini(env,category,seed){
  }catch(e){console.warn('special gemini fallback',String(e));return null}
 }
 async function specialDigest(env){
- const r=await env.NEWS_DB.prepare("SELECT title,url,source FROM articles WHERE status='published' AND created_at >= datetime('now','-1 day') ORDER BY created_at DESC LIMIT 18").all();
+ const r=await env.NEWS_DB.prepare("SELECT title,url,source FROM articles WHERE status='published' AND source NOT IN ('BBCPersian','BBC Persian') AND url NOT LIKE '%bbc.com/persian%' AND url NOT LIKE '%bbci.co.uk/persian%' AND created_at >= datetime('now','-1 day') ORDER BY created_at DESC LIMIT 18").all();
  const rows=[];for(const x of r.results||[]){
   if(!x.url||!String(x.url).startsWith('https://')&&!String(x.url).startsWith('http://'))continue;
   if(rows.some(y=>canonicalNewsUrl(y.url)===canonicalNewsUrl(x.url)||normalizedHeadline(y.title)===normalizedHeadline(x.title)||similarity(y.title,x.title)>=0.68))continue;
